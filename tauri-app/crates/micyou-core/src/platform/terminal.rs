@@ -145,6 +145,9 @@ mod tests {
 
         assert_eq!(find_exact_file(&dir, "micyou-cli.exe"), None);
 
+        // Windows 覆写同名文件会保留原大小写，先移除错误拼写的测试样本。
+        fs::remove_file(dir.join("MicYou-CLI.exe"))
+            .expect("case-variant fixture should be removed before exact-name fixture");
         let cli = dir.join("micyou-cli.exe");
         fs::write(&cli, b"cli").expect("CLI fixture should be written");
         assert_eq!(find_exact_file(&dir, "micyou-cli.exe"), Some(cli));
