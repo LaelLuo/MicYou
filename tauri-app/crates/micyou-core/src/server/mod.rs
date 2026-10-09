@@ -17,6 +17,7 @@
 //! operations on it.
 
 mod audio_pipeline;
+pub mod downlink;
 pub mod lifecycle;
 pub mod output;
 pub mod service;
@@ -40,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 pub use service::{start_server, stop_server, StartRequest};
 
 pub struct ServerState {
+    pub downlink: Arc<downlink::DownlinkController>,
     pub events: SharedEvents,
     /// The frontend's own resource directory, if it knows one (see
     /// [`crate::platform::resources::find_resource_dir`]).
@@ -71,6 +73,13 @@ impl ServerState {
         // The output engine watches the stats' mute flag directly: switching to
         // muted drops queued audio and outputs silence within one callback period.
         let audio_output = AudioOutputHandle::spawn_with_mute_flag(network_stats.mute_flag());
+        let downlink = downlink::DownlinkController::new(
+            events.clone(),
+            vec![
+                audio_output.actual_endpoint_id.clone(),
+                audio_output.monitor_endpoint_id.clone(),
+            ],
+        );
         let active_connection = Arc::new(Mutex::new(None));
         let active_audio_session = Arc::new(RwLock::new(ActiveAudioSession::Inactive));
         let lifecycle = Arc::new(Mutex::new(ServerLifecycleState::default()));
@@ -91,6 +100,7 @@ impl ServerState {
         );
 
         let state = Self {
+            downlink,
             events,
             resource_hint,
             lifecycle_gate: ServerLifecycleGate::default(),
@@ -119,5 +129,21 @@ impl ServerState {
     /// Resolved directory of bundled models and configs.
     pub fn resource_dir(&self) -> Option<PathBuf> {
         crate::platform::resources::find_resource_dir(self.resource_hint.as_deref())
+    }
+
+    pub async fn list_downlink_sources(&self) -> Result<Vec<downlink::DownlinkSource>, String> {
+        let controller = self.downlink.clone();
+        tokio::task::spawn_blocking(move || controller.sources())
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    pub fn get_downlink_status(&self) -> downlink::DownlinkStatus {
+        self.downlink.status()
+    }
+    pub async fn set_downlink_source(
+        &self,
+        source_id: Option<String>,
+    ) -> Result<downlink::DownlinkStatus, String> {
+        self.downlink.set_source(source_id).await
     }
 }

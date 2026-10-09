@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 
 /// Shared config directory (Windows: %APPDATA%\micyou, unix: XDG_CONFIG_HOME or ~/.config + micyou).
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = config_override_dir() {
+        return dir;
+    }
     #[cfg(target_os = "windows")]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -37,6 +40,13 @@ pub fn config_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
         .join("micyou")
+}
+
+/// Isolate a portable instance's configuration and process lock together.
+pub(crate) fn config_override_dir() -> Option<PathBuf> {
+    std::env::var_os("MICYOU_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// settings.json: the DSP settings shared by GUI, CLI and TUI.
@@ -160,6 +170,8 @@ pub struct ServerPrefs {
     pub auto_bind: bool,
     /// Selected output audio device name.
     pub output_device: String,
+    /// 独立回环来源；None 表示跟随默认播放端点，开启状态不落盘。
+    pub downlink_source_id: Option<String>,
     /// Whether mute state is synchronized with the mobile client in both
     /// directions. When false, the desktop neither sends its mute state to
     /// the phone nor applies mute state received from it. Defaults to true,
@@ -176,6 +188,7 @@ impl Default for ServerPrefs {
             bind_address: "0.0.0.0".to_string(),
             auto_bind: true,
             output_device: String::new(),
+            downlink_source_id: None,
             mute_sync: true,
         }
     }
@@ -188,5 +201,40 @@ pub fn load_server_prefs() -> ServerPrefs {
 
 /// Persist connection settings to server.json (GUI, CLI and TUI share this file).
 pub fn save_server_prefs(prefs: &ServerPrefs) -> Result<(), String> {
+    let _guard = SERVER_PREFS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
     save_json(&server_prefs_path(), prefs)
+}
+
+static SERVER_PREFS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 原子合并各界面拥有的字段，避免来源与连接设置互相覆盖。
+pub fn update_server_prefs(update: impl FnOnce(&mut ServerPrefs)) -> Result<(), String> {
+    let _guard = SERVER_PREFS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut prefs = load_server_prefs();
+    update(&mut prefs);
+    save_json(&server_prefs_path(), &prefs)
+}
+
+pub fn save_connection_prefs(prefs: &ServerPrefs) -> Result<(), String> {
+    update_server_prefs(|current| {
+        let source = current.downlink_source_id.clone();
+        *current = prefs.clone();
+        current.downlink_source_id = source;
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_config_defaults_source_without_persisting_enable_state() {
+        let prefs: ServerPrefs =
+            serde_json::from_str(r#"{"port":8554,"outputDevice":"Cable"}"#).unwrap();
+        assert_eq!(prefs.downlink_source_id, None);
+        assert_eq!(prefs.output_device, "Cable");
+        let value = serde_json::to_value(prefs).unwrap();
+        assert!(value.get("downlinkSourceId").unwrap().is_null());
+        assert!(value.get("requested").is_none());
+        assert!(value.get("active").is_none());
+    }
 }

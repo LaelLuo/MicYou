@@ -16,6 +16,7 @@
 use micyou_core::config::{self, ServerPrefs};
 use micyou_core::micyou_audio::dsp::AudioDspSettings;
 use micyou_core::platform::{blackhole, vbcable};
+use micyou_core::server::downlink::{DownlinkSource, DownlinkStatus};
 use micyou_core::server::ServerState;
 use micyou_core::settings::PipeWireStatus;
 #[cfg(feature = "vbcable")]
@@ -27,6 +28,26 @@ use tauri::{AppHandle, State};
 #[tauri::command]
 pub async fn get_audio_devices() -> Result<Vec<String>, String> {
     super::blocking(|| Ok(micyou_core::settings::audio_devices())).await
+}
+
+#[tauri::command]
+pub async fn list_downlink_sources(
+    state: State<'_, ServerState>,
+) -> Result<Vec<DownlinkSource>, String> {
+    state.list_downlink_sources().await
+}
+
+#[tauri::command]
+pub fn get_downlink_status(state: State<'_, ServerState>) -> DownlinkStatus {
+    state.get_downlink_status()
+}
+
+#[tauri::command]
+pub async fn set_downlink_source(
+    state: State<'_, ServerState>,
+    source_id: Option<String>,
+) -> Result<DownlinkStatus, String> {
+    state.set_downlink_source(source_id).await
 }
 
 #[tauri::command]
@@ -50,7 +71,7 @@ pub fn get_server_prefs() -> ServerPrefs {
 
 #[tauri::command]
 pub fn save_server_prefs(prefs: ServerPrefs) -> Result<String, String> {
-    config::save_server_prefs(&prefs)?;
+    config::save_connection_prefs(&prefs)?;
     Ok("Server prefs saved".to_string())
 }
 

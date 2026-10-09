@@ -4,6 +4,8 @@ import type {
   BlackHoleResult,
   BlackHoleStatus,
   BlurRect,
+  DownlinkSource,
+  DownlinkStatus,
   InstalledTheme,
   ModeStatus,
   NetworkInfo,
@@ -44,6 +46,9 @@ export interface Commands {
 
   // Audio devices and DSP
   get_audio_devices: { args: NoArgs; result: string[] };
+  list_downlink_sources: { args: NoArgs; result: DownlinkSource[] };
+  get_downlink_status: { args: NoArgs; result: DownlinkStatus };
+  set_downlink_source: { args: { sourceId: string | null }; result: DownlinkStatus };
   get_audio_settings: { args: NoArgs; result: Partial<AudioDspSettings> };
   update_audio_settings: { args: { settings: AudioDspSettings }; result: string };
   get_server_prefs: { args: NoArgs; result: ServerPrefs };

@@ -1,4 +1,35 @@
 {
+  "downlink": {
+    "title": "電腦聲音 → 手機",
+    "description": "在手機開啟電腦聲音接收。此來源與手機咪高峰輸出裝置分別設定。",
+    "refresh": "重新整理來源",
+    "source": "電腦聲音來源",
+    "defaultSource": "跟隨 Windows 預設播放裝置",
+    "defaultBadge": "預設",
+    "feedbackBadge": "咪高峰輸出",
+    "missingSource": "已儲存的來源無法使用",
+    "states": {
+      "error": "電腦聲音已停止",
+      "loading": "正在更新電腦聲音…",
+      "unavailable": "暫時無法取得狀態",
+      "unsupported": "不支援電腦聲音",
+      "active": "正在向手機傳送電腦聲音",
+      "starting": "正在啟動電腦聲音…",
+      "idle": "在手機開啟播放，即可接收電腦聲音"
+    },
+    "errors": {
+      "unsupported_platform": "電腦聲音僅支援 Windows。",
+      "unsupported_peer": "已連接的手機不支援電腦聲音。",
+      "source_unavailable": "所選播放裝置無法使用，請選擇其他來源。",
+      "feedback_source": "此來源接收手機咪高峰，請選擇其他來源以避免回音。",
+      "capture_failed": "無法擷取電腦聲音，請重新整理或選擇其他來源。",
+      "invalid_frame": "電腦聲音資料異常，請在手機重新開啟播放。",
+      "transport_stalled": "連線傳輸停滯，請重新連接手機。",
+      "load_failed": "無法讀取來源或狀態，請嘗試重新整理。",
+      "save_failed": "無法更改來源，請重新整理確認目前選擇。",
+      "unknown": "電腦聲音發生錯誤，請重新整理或選擇其他來源。"
+    }
+  },
   "app": {
     "connectionMode": "連線模式",
     "port": "埠口",

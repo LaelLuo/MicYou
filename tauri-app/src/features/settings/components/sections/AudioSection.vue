@@ -5,6 +5,8 @@ import { ArrowRight, Ban, ChevronRight } from '@lucide/vue';
 import { command, onEvent, type UnlistenFn } from '@/platform';
 import MD3Slider from '@/shared/components/ui/slider/MD3Slider.vue';
 import AudioChainDialog from '@/features/audio/components/AudioChainDialog.vue';
+import DownlinkCard from '@/features/audio/components/DownlinkCard.vue';
+import { isWindows } from '@/shared/lib/os';
 import { chainStageLabel } from '@/features/audio/chain';
 import { usePlugins } from '@/features/plugins/composables/usePlugins';
 import { isAecSupported, useAudioSettings } from '../../composables/useAudioSettings';
@@ -136,6 +138,7 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-6">
+    <DownlinkCard v-if="isWindows" />
     <!-- Spectrum Analyzer / Real-time Monitoring -->
     <div class="haze-surface p-4 space-y-3">
       <div class="flex justify-between items-center">

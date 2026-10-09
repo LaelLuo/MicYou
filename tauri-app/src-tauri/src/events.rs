@@ -16,6 +16,7 @@
 //! Forwards core server events to the webview.
 
 use micyou_core::events::{AecStatus, DownloadProgress, ServerEvents, SpectrumPayload};
+use micyou_core::server::downlink::DownlinkStatus;
 use micyou_core::stats::AudioMetrics;
 use micyou_core::transport::tcp::DeviceInfo;
 use serde::Serialize;
@@ -32,6 +33,9 @@ impl TauriEventSink {
 }
 
 impl ServerEvents for TauriEventSink {
+    fn downlink_status_changed(&self, status: DownlinkStatus) {
+        self.emit("downlink-status-changed", status);
+    }
     fn device_connected(&self, info: DeviceInfo) {
         self.emit("device-connected", info);
     }

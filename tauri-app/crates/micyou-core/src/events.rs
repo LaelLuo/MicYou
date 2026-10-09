@@ -23,6 +23,7 @@ use std::sync::Arc;
 /// the CLI writes log lines and the TUI updates its state. The core never
 /// talks to a UI toolkit directly.
 pub trait ServerEvents: Send + Sync + 'static {
+    fn downlink_status_changed(&self, _status: crate::server::downlink::DownlinkStatus) {}
     fn device_connected(&self, info: DeviceInfo);
     fn device_disconnected(&self);
     fn audio_metrics(&self, metrics: AudioMetrics);

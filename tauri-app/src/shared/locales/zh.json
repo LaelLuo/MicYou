@@ -1,4 +1,35 @@
 {
+  "downlink": {
+    "title": "电脑声音 → 手机",
+    "description": "在手机开启电脑声音接收。此来源与手机麦克风输出设备分别设置。",
+    "refresh": "刷新来源",
+    "source": "电脑声音来源",
+    "defaultSource": "跟随 Windows 默认播放设备",
+    "defaultBadge": "默认",
+    "feedbackBadge": "麦克风输出",
+    "missingSource": "已保存的来源不可用",
+    "states": {
+      "error": "电脑声音已停止",
+      "loading": "正在更新电脑声音…",
+      "unavailable": "暂时无法获取状态",
+      "unsupported": "不支持电脑声音",
+      "active": "正在向手机发送电脑声音",
+      "starting": "正在启动电脑声音…",
+      "idle": "在手机开启播放，即可接收电脑声音"
+    },
+    "errors": {
+      "unsupported_platform": "电脑声音仅支持 Windows。",
+      "unsupported_peer": "已连接的手机不支持电脑声音。",
+      "source_unavailable": "所选播放设备不可用，请选择其他来源。",
+      "feedback_source": "此来源接收手机麦克风，请选择其他来源以避免回声。",
+      "capture_failed": "无法采集电脑声音，请刷新或选择其他来源。",
+      "invalid_frame": "电脑声音数据异常，请在手机重新开启播放。",
+      "transport_stalled": "连接传输停滞，请重新连接手机。",
+      "load_failed": "无法读取来源或状态，请尝试刷新。",
+      "save_failed": "无法更改来源，请刷新确认当前选择。",
+      "unknown": "电脑声音发生错误，请刷新或选择其他来源。"
+    }
+  },
   "app": {
     "connectionMode": "连接模式",
     "port": "端口",

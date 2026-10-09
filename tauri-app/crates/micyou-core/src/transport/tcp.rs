@@ -46,7 +46,7 @@ const MAX_CONTROL_PAYLOAD_LEN: usize = 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_CLIENTS: usize = 64;
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const CLIENT_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_millis(250);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -67,6 +67,39 @@ pub type SharedTakeoverLock = Arc<Mutex<()>>;
 
 struct TaskGuard {
     tasks: Vec<JoinHandle<()>>,
+}
+
+async fn next_outgoing(
+    control: &mut tokio::sync::mpsc::Receiver<MessageWrapper>,
+    audio: &mut tokio::sync::mpsc::Receiver<MessageWrapper>,
+    cancel: &CancellationToken,
+) -> Option<MessageWrapper> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        message = control.recv() => message,
+        message = audio.recv() => message,
+    }
+}
+
+async fn write_frame(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    message: MessageWrapper,
+) -> Result<(), IoError> {
+    let payload = message.encode_to_vec();
+    if payload.len() > MAX_CONTROL_PAYLOAD_LEN {
+        return Err(IoError::new(
+            ErrorKind::InvalidData,
+            "outgoing payload exceeds limit",
+        ));
+    }
+    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+    frame.extend_from_slice(&PACKET_MAGIC.to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    timeout(FRAME_WRITE_TIMEOUT, writer.write_all(&frame))
+        .await
+        .map_err(|_| IoError::new(ErrorKind::TimedOut, "transport_stalled"))?
 }
 
 impl TaskGuard {
@@ -100,6 +133,7 @@ pub struct DeviceInfo {
 }
 
 pub struct TcpServerConfig {
+    pub downlink: Arc<crate::server::downlink::DownlinkController>,
     pub events: SharedEvents,
     pub port: u16,
     pub bind_address: String,
@@ -129,6 +163,7 @@ async fn serve(
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let TcpServerConfig {
+        downlink,
         events,
         port,
         bind_address,
@@ -216,6 +251,7 @@ async fn serve(
                     let takeover_lock = takeover_lock.clone();
                     let active_audio_session = active_audio_session.clone();
                     let plugins = plugins.clone();
+                    let downlink = downlink.clone();
                     let client_cancel = cancel_token.clone();
                     clients.spawn(async move {
                         let _permit = permit;
@@ -231,6 +267,7 @@ async fn serve(
                             active_audio_session,
                             plugins,
                             client_cancel,
+                            downlink,
                         )
                         .await
                         {
@@ -441,6 +478,7 @@ async fn handle_client(
     active_audio_session: SharedActiveAudioSession,
     plugins: Arc<crate::plugins::PluginHost>,
     cancel_token: CancellationToken,
+    downlink: Arc<crate::server::downlink::DownlinkController>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut handshake_buf = vec![0u8; HANDSHAKE_CLIENT_STR.len()];
     tokio::select! {
@@ -483,6 +521,11 @@ async fn handle_client(
         Some(connect) => ExpectedAudioSession::Bound(connect.session_id),
         None => ExpectedAudioSession::UnboundLegacy,
     };
+    let (downlink_session, downlink_supported) = first_message
+        .connect
+        .as_ref()
+        .map(|c| (c.session_id, c.supports_downlink))
+        .unwrap_or((0, false));
 
     #[cfg(windows)]
     let raw: RawSocketHandle = std::os::windows::io::AsRawSocket::as_raw_socket(&socket);
@@ -491,6 +534,8 @@ async fn handle_client(
 
     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<MessageWrapper>(100);
+    let (downlink_tx, mut downlink_rx) =
+        tokio::sync::mpsc::channel::<MessageWrapper>(crate::server::downlink::AUDIO_QUEUE_FRAMES);
     let takeover_token = CancellationToken::new();
 
     // Serialize reservation and publication so acknowledged candidates cannot reorder
@@ -550,6 +595,16 @@ async fn handle_client(
         old
     };
     drop(old);
+    downlink
+        .attach(
+            connection_id,
+            downlink_session,
+            downlink_supported,
+            tx.clone(),
+            downlink_tx,
+            takeover_token.clone(),
+        )
+        .await;
     drop(_takeover_guard);
 
     log::info!("Handshake successful with {}", addr);
@@ -586,36 +641,25 @@ async fn handle_client(
     .await;
 
     let (mut read_half, mut write_half) = socket.into_split();
+    let writer_cancel = takeover_token.clone();
+    let writer_downlink = downlink.clone();
     let writer_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let payload = msg.encode_to_vec();
-            if payload.len() > MAX_CONTROL_PAYLOAD_LEN {
-                log::warn!("Outgoing control payload exceeds protocol limit");
+        loop {
+            let Some(msg) = next_outgoing(&mut rx, &mut downlink_rx, &writer_cancel).await else {
                 break;
+            };
+            if let Some(audio) = &msg.downlink_audio {
+                if !writer_downlink.accepts_audio(connection_id, audio) {
+                    continue;
+                }
             }
-            let Ok(payload_len) = i32::try_from(payload.len()) else {
+            if let Err(error) = write_frame(&mut write_half, msg).await {
+                log::warn!("[TCP] writer failed: {error}");
+                writer_downlink.transport_failed(connection_id);
                 break;
-            };
-            let frame_len = match FRAME_HEADER_LEN.checked_add(payload.len()) {
-                Some(len) => len,
-                None => break,
-            };
-            let mut frame = Vec::with_capacity(frame_len);
-            frame.extend_from_slice(&PACKET_MAGIC.to_be_bytes());
-            frame.extend_from_slice(&payload_len.to_be_bytes());
-            frame.extend_from_slice(&payload);
-            match timeout(FRAME_WRITE_TIMEOUT, write_half.write_all(&frame)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    log::warn!("Write failed: {}", e);
-                    break;
-                }
-                Err(_) => {
-                    log::warn!("Control frame write timed out");
-                    break;
-                }
             }
         }
+        writer_cancel.cancel();
     });
 
     let tx_ping = tx.clone();
@@ -632,6 +676,7 @@ async fn handle_client(
                 }),
                 pong: None,
                 plugin_message: None,
+                ..Default::default()
             };
             if tx_ping.send(ping_msg).await.is_err() {
                 break;
@@ -686,6 +731,9 @@ async fn handle_client(
             if takeover_token.is_cancelled() {
                 break;
             }
+            if let Some(request) = message.downlink_request {
+                downlink.request(connection_id, request).await;
+            }
             handle_message(
                 message,
                 &mut meter,
@@ -708,9 +756,11 @@ async fn handle_client(
 
     let reader_result = tokio::select! {
         _ = cancel_token.cancelled() => Ok(()),
+        _ = takeover_token.cancelled() => Ok(()),
         result = reader => result,
     };
     task_guard.abort_and_wait().await;
+    downlink.detach(connection_id).await;
 
     if clear_if_active(&active_connection, connection_id).await {
         *active_audio_session
@@ -776,6 +826,7 @@ async fn handle_message(
                 timestamp: ping.timestamp,
             }),
             plugin_message: None,
+            ..Default::default()
         };
         let permit = tokio::select! {
             biased;
@@ -828,6 +879,256 @@ async fn handle_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoHost;
+    impl crate::host::HostIntegration for NoHost {
+        fn open_url(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn notify(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn register_hotkey(&self, _: &str, _: crate::host::HotkeyCallback) -> Result<(), String> {
+            Ok(())
+        }
+        fn open_plugin_panel(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    async fn read_test_frame(socket: &mut TcpStream) -> MessageWrapper {
+        timeout(Duration::from_secs(3), async {
+            let mut header = [0; FRAME_HEADER_LEN];
+            socket.read_exact(&mut header).await.unwrap();
+            let mut bytes = vec![0; parse_frame_header(&header).unwrap()];
+            socket.read_exact(&mut bytes).await.unwrap();
+            MessageWrapper::decode(bytes.as_slice()).unwrap()
+        })
+        .await
+        .unwrap()
+    }
+    async fn read_test_state(
+        socket: &mut TcpStream,
+    ) -> micyou_protocol::micyou::DownlinkStateMessage {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(state) = read_test_frame(socket).await.downlink_state {
+                    return state;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn negotiated_tcp_capture_failure_and_disable_preserve_uplink_and_ping() {
+        let events: SharedEvents = Arc::new(crate::server::downlink::tests::Events::default());
+        let mut state = crate::server::ServerState::new(events.clone(), Arc::new(NoHost), None);
+        state.downlink = crate::server::downlink::tests::unavailable_controller(events.clone());
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut socket = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server_socket, address) = listener.accept().await.unwrap();
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(10);
+        let server_state = state.clone();
+        let task = tokio::spawn(async move {
+            handle_client(
+                server_socket,
+                address,
+                server_state.events.clone(),
+                audio_tx,
+                server_state.network_stats.clone(),
+                ConnectionMode::Wifi,
+                server_state.active_connection.clone(),
+                server_state.takeover_lock.clone(),
+                server_state.active_audio_session.clone(),
+                server_state.plugins.clone(),
+                CancellationToken::new(),
+                server_state.downlink.clone(),
+            )
+            .await
+        });
+        socket.write_all(HANDSHAKE_CLIENT_STR).await.unwrap();
+        let mut response = vec![0; HANDSHAKE_SERVER_STR.len()];
+        socket.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, HANDSHAKE_SERVER_STR);
+        write_frame(
+            &mut socket,
+            MessageWrapper {
+                connect: Some(micyou_protocol::micyou::ConnectMessage {
+                    session_id: 41,
+                    supports_downlink: true,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let initial = read_test_state(&mut socket).await;
+        assert_eq!(
+            (
+                initial.session_id,
+                initial.request_id,
+                initial.stream_id,
+                initial.active
+            ),
+            (41, 0, 0, false)
+        );
+        assert!(matches!(
+            audio_rx.recv().await,
+            Some(AudioStreamEvent::SessionStarting { .. })
+        ));
+        write_frame(
+            &mut socket,
+            MessageWrapper {
+                downlink_request: Some(micyou_protocol::micyou::DownlinkRequestMessage {
+                    session_id: 41,
+                    request_id: 1,
+                    enabled: true,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let failed = read_test_state(&mut socket).await;
+        assert!(!failed.active);
+        assert_eq!((failed.request_id, failed.stream_id), (1, 1));
+        #[cfg(windows)]
+        assert_eq!(failed.error, "source_unavailable");
+        #[cfg(not(windows))]
+        assert_eq!(failed.error, "unsupported_platform");
+        write_frame(
+            &mut socket,
+            MessageWrapper {
+                downlink_request: Some(micyou_protocol::micyou::DownlinkRequestMessage {
+                    session_id: 41,
+                    request_id: 2,
+                    enabled: false,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let stopped = read_test_state(&mut socket).await;
+        assert_eq!(
+            (stopped.request_id, stopped.stream_id, stopped.active),
+            (2, failed.stream_id, false)
+        );
+        write_frame(
+            &mut socket,
+            MessageWrapper {
+                audio_packet: Some(micyou_protocol::micyou::AudioPacketMessageOrdered {
+                    session_id: 41,
+                    sequence_number: 1,
+                    audio_packet: Some(micyou_protocol::micyou::AudioPacketMessage {
+                        buffer: vec![1, 0],
+                        sample_rate: 48000,
+                        channel_count: 1,
+                        audio_format: 2,
+                        codec: 0,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let received = timeout(Duration::from_secs(1), audio_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(received, AudioStreamEvent::Packet { packet, .. } if packet.session_id == 41 && packet.sequence_number == 1)
+        );
+        write_frame(
+            &mut socket,
+            MessageWrapper {
+                ping: Some(micyou_protocol::micyou::PingMessage { timestamp: 123 }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        loop {
+            if let Some(pong) = read_test_frame(&mut socket).await.pong {
+                assert_eq!(pong.timestamp, 123);
+                break;
+            }
+        }
+        assert!(state.active_connection.lock().await.is_some());
+        drop(socket);
+        let _ = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.active_connection.lock().await.is_none());
+        assert!(!state.downlink.status().phone_supported);
+    }
+
+    #[tokio::test]
+    async fn full_audio_queue_keeps_control_first_and_remains_bounded() {
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(2);
+        let (audio_tx, mut audio_rx) =
+            tokio::sync::mpsc::channel(crate::server::downlink::AUDIO_QUEUE_FRAMES);
+        for sequence in 0..5 {
+            audio_tx
+                .try_send(MessageWrapper {
+                    downlink_audio: Some(micyou_protocol::micyou::DownlinkAudioMessage {
+                        session_id: 1,
+                        stream_id: 1,
+                        sequence_number: sequence,
+                        pcm: vec![0; micyou_protocol::DOWNLINK_FRAME_BYTES],
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            audio_tx.try_send(MessageWrapper::default()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        control_tx
+            .try_send(MessageWrapper {
+                ping: Some(micyou_protocol::micyou::PingMessage { timestamp: 99 }),
+                ..Default::default()
+            })
+            .unwrap();
+        let token = CancellationToken::new();
+        let first = next_outgoing(&mut control_rx, &mut audio_rx, &token)
+            .await
+            .unwrap();
+        assert_eq!(first.ping.unwrap().timestamp, 99);
+        assert_eq!(audio_rx.len(), 5);
+        token.cancel();
+        assert!(next_outgoing(&mut control_rx, &mut audio_rx, &token)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn stalled_writer_times_out_without_unbounded_buffering() {
+        let (mut writer, _unread_peer) = tokio::io::duplex(16);
+        let message = MessageWrapper {
+            downlink_audio: Some(micyou_protocol::micyou::DownlinkAudioMessage {
+                session_id: 1,
+                stream_id: 1,
+                sequence_number: 0,
+                pcm: vec![0; micyou_protocol::DOWNLINK_FRAME_BYTES],
+            }),
+            ..Default::default()
+        };
+        let started = tokio::time::Instant::now();
+        let error = write_frame(&mut writer, message).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(started.elapsed() >= FRAME_WRITE_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     fn header(payload_len: i32) -> [u8; FRAME_HEADER_LEN] {
         let mut header = [0; FRAME_HEADER_LEN];

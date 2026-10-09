@@ -3497,6 +3497,7 @@ dependencies = [
  "rustfft",
  "serde",
  "wasapi",
+ "windows",
 ]
 
 [[package]]
@@ -3581,6 +3582,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde_json",
 ]
 
 [[package]]

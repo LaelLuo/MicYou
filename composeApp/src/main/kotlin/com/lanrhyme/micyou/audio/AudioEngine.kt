@@ -54,6 +54,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.selects.select
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.protobuf.ProtoBuf
 import io.github.jaredmdobson.concentus.OpusApplication
@@ -350,6 +351,12 @@ class AudioEngine constructor() {
     private val _isMuted = MutableStateFlow(false)
     val isMuted: Flow<Boolean> = _isMuted
 
+    private val _desktopAudioStatus = MutableStateFlow(DesktopAudioStatus())
+    val desktopAudioStatus: Flow<DesktopAudioStatus> = _desktopAudioStatus
+    @Volatile private var downlinkSession: DownlinkSession? = null
+
+    fun setDesktopAudioEnabled(enabled: Boolean) { downlinkSession?.setEnabled(enabled) }
+
     private data class StopResources(
         val sessionJob: Job?,
         val recorder: AudioRecord?,
@@ -495,6 +502,8 @@ class AudioEngine constructor() {
                     // Written by the reader coroutine, read by the capture loop.
                     val sessionLastPingReceivedTime = java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime())
                     val channel = Channel<MessageWrapper>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+                    val controlChannel = Channel<MessageWrapper>(capacity = 64)
+                    var sessionDownlink: DownlinkSession? = null
                     startStopMutex.withLock {
                         if (lifecycleGeneration == sessionGeneration && desiredRunning) {
                             sendChannel = channel
@@ -681,7 +690,7 @@ class AudioEngine constructor() {
                             Logger.i("AudioEngine", "Handshake successful")
                             val connectBytes = proto.encodeToByteArray(
                                 MessageWrapper.serializer(),
-                                MessageWrapper(connect = ConnectMessage(sessionId))
+                                MessageWrapper(connect = ConnectMessage(sessionId, supportsDownlink = true))
                             )
                             out.writeInt(PACKET_MAGIC)
                             out.writeInt(connectBytes.size)
@@ -719,11 +728,28 @@ class AudioEngine constructor() {
                         }
                         _state.value = StreamState.Streaming
                         _lastError.value = null
+                        ContextHelper.getContext()?.let { context ->
+                            sessionDownlink = DownlinkSession(context, this, sessionId, sessionRecorder,
+                                send = { request ->
+                                    if (controlChannel.trySend(MessageWrapper(downlinkRequest = request)).isFailure) {
+                                        tcpSocket?.close()
+                                        throw java.io.IOException("Downlink control queue stalled")
+                                    }
+                                }, publish = { status ->
+                                    if (lifecycleGeneration == sessionGeneration && desiredRunning) _desktopAudioStatus.value = status
+                                })
+                            downlinkSession = sessionDownlink
+                        }
                         connectionComplete.complete(Unit)
 
                         val writerJob = launch {
                             Logger.d("AudioEngine", "Writer loop started")
-                            for (msg in channel) {
+                            while (isActive) {
+                                // 独立控制队列优先，音频丢帧不能吞掉下行释放请求。
+                                val msg = controlChannel.tryReceive().getOrNull() ?: select<MessageWrapper?> {
+                                    controlChannel.onReceiveCatching { it.getOrNull() }
+                                    channel.onReceiveCatching { it.getOrNull() }
+                                } ?: break
                                 try {
                                     // 根据传输协议决定发送方式
                                     val shouldUseUdp = when (transportProtocol) {
@@ -787,6 +813,8 @@ class AudioEngine constructor() {
                                             inChannel.readFully(packetBytes)
                                             try {
                                                 val wrapper = proto.decodeFromByteArray(MessageWrapper.serializer(), packetBytes)
+                                                wrapper.downlinkState?.let { sessionDownlink?.state(it) }
+                                                wrapper.downlinkAudio?.let { sessionDownlink?.frame(it) }
                                                 if (wrapper.mute != null) {
                                                     _isMuted.value = wrapper.mute.isMuted
                                                     Logger.i("AudioEngine", "Received Mute Command: ${wrapper.mute.isMuted}")
@@ -1029,6 +1057,12 @@ class AudioEngine constructor() {
                     } finally {
                         connectionComplete.completeExceptionally(CancellationException("Audio session ended before startup completed"))
                         Logger.d("AudioEngine", "Cleaning up resources for generation $sessionGeneration")
+                        withContext(NonCancellable) { sessionDownlink?.close() }
+                        if (downlinkSession === sessionDownlink) {
+                            downlinkSession = null
+                            _desktopAudioStatus.value = DesktopAudioStatus()
+                        }
+                        controlChannel.close()
                         channel.close()
                         val recorderToRelease = recorder
                         val recorderStopCompletion = stopAndReleaseRecorderAsync(recorderToRelease)

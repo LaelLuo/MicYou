@@ -25,6 +25,10 @@
 
 </div>
 
+## Duplex fork
+
+This fork adds optional Windows-to-Android stereo playback while retaining the phone microphone uplink. See the [duplex build, usage and rollback guide](docs/duplex-audio.md). Use the separate Duplex packages and portable launcher; they isolate the fork from an existing MicYou installation. Hardware listening acceptance is tracked separately from builds and automated tests.
+
 ## Features
 
 - Stream from the Android app over Wi-Fi or USB (ADB), or use Web mode directly from a mobile browser by scanning a QR code.

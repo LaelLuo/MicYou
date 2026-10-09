@@ -101,7 +101,40 @@ data class MuteMessage(
 @Serializable
 data class ConnectMessage(
     @ProtoNumber(1)
-    val sessionId: Long = 0
+    val sessionId: Long = 0,
+    @ProtoNumber(2)
+    val supportsDownlink: Boolean = false
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class DownlinkRequestMessage(
+    @ProtoNumber(1) val sessionId: Long = 0,
+    @ProtoNumber(2) val requestId: Long = 0,
+    @ProtoNumber(3) val enabled: Boolean = false
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class DownlinkStateMessage(
+    @ProtoNumber(1) val sessionId: Long = 0,
+    @ProtoNumber(2) val requestId: Long = 0,
+    @ProtoNumber(3) val streamId: Long = 0,
+    @ProtoNumber(4) val supported: Boolean = false,
+    @ProtoNumber(5) val active: Boolean = false,
+    @ProtoNumber(6) val error: String = "",
+    @ProtoNumber(7) val sampleRate: Int = 0,
+    @ProtoNumber(8) val channelCount: Int = 0,
+    @ProtoNumber(9) val audioFormat: Int = 0
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class DownlinkAudioMessage(
+    @ProtoNumber(1) val sessionId: Long = 0,
+    @ProtoNumber(2) val streamId: Long = 0,
+    @ProtoNumber(3) val sequenceNumber: Long = 0,
+    @ProtoNumber(4) val pcm: ByteArray = byteArrayOf()
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -153,7 +186,7 @@ fun calculateUdpPort(tcpPort: Int): Int {
 
 /** 判断 MessageWrapper 是否包含控制消息（应通过 TCP 发送） */
 fun MessageWrapper.hasControlMessage(): Boolean {
-    return connect != null || mute != null || ping != null || pong != null
+    return connect != null || mute != null || ping != null || pong != null || downlinkRequest != null
 }
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -168,5 +201,11 @@ data class MessageWrapper(
     @ProtoNumber(5)
     val ping: PingMessage? = null,
     @ProtoNumber(6)
-    val pong: PongMessage? = null
+    val pong: PongMessage? = null,
+    @ProtoNumber(8)
+    val downlinkRequest: DownlinkRequestMessage? = null,
+    @ProtoNumber(9)
+    val downlinkState: DownlinkStateMessage? = null,
+    @ProtoNumber(10)
+    val downlinkAudio: DownlinkAudioMessage? = null
 )

@@ -38,6 +38,9 @@ pub struct ModeLock {
 }
 
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = crate::config::config_override_dir() {
+        return dir;
+    }
     #[cfg(target_os = "windows")]
     {
         std::env::var("APPDATA")

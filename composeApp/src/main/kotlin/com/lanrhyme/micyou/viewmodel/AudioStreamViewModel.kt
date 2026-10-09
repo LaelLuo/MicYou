@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.lanrhyme.micyou.audio.AudioEngine
+import com.lanrhyme.micyou.audio.DesktopAudioStatus
 import com.lanrhyme.micyou.audio.AudioFormat
 import com.lanrhyme.micyou.audio.ChannelCount
 import com.lanrhyme.micyou.audio.SampleRate
@@ -58,6 +59,7 @@ data class AudioStreamUiState(
     val channelCount: ChannelCount = ChannelCount.Stereo,
     val audioFormat: AudioFormat = defaultAudioFormat(),
     val isMuted: Boolean = false,
+    val desktopAudio: DesktopAudioStatus = DesktopAudioStatus(),
     val isAutoConfig: Boolean = true,
     // Error Dialog State
     val showErrorDialog: Boolean = false,
@@ -157,6 +159,9 @@ class AudioStreamViewModel : ViewModel() {
 
     private fun setupAudioEngineObservers() {
         auxiliaryScope.launch {
+            _audioEngine.desktopAudioStatus.collect { status -> _uiState.update { it.copy(desktopAudio = status) } }
+        }
+        auxiliaryScope.launch {
             _audioEngine.streamState.collect { state ->
                 _uiState.update { it.copy(streamState = state) }
             }
@@ -201,6 +206,8 @@ class AudioStreamViewModel : ViewModel() {
             _audioEngine.setMute(newMuteState)
         }
     }
+
+    fun setDesktopAudioEnabled(enabled: Boolean) = _audioEngine.setDesktopAudioEnabled(enabled)
 
     fun startStream() {
         if (isStartStreamRequestPending ||

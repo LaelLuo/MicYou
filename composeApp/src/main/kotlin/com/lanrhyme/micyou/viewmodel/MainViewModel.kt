@@ -84,6 +84,7 @@ data class AppUiState(
     val channelCount: ChannelCount = ChannelCount.Stereo,
     val audioFormat: AudioFormat = AudioFormat.PCM_FLOAT,
     val isMuted: Boolean = false,
+    val desktopAudio: com.lanrhyme.micyou.audio.DesktopAudioStatus = com.lanrhyme.micyou.audio.DesktopAudioStatus(),
     val isAutoConfig: Boolean = true,
 
     // Error Dialog State
@@ -212,6 +213,7 @@ class MainViewModel : ViewModel() {
                         channelCount = audioState.channelCount,
                         audioFormat = audioState.audioFormat,
                         isMuted = audioState.isMuted,
+                        desktopAudio = audioState.desktopAudio,
                         isAutoConfig = audioState.isAutoConfig,
                         showErrorDialog = audioState.showErrorDialog,
                         errorDetails = audioState.errorDetails,
@@ -253,6 +255,7 @@ class MainViewModel : ViewModel() {
     // Audio Stream methods
     fun toggleStream() = audioStreamViewModel.toggleStream()
     fun toggleMute() = audioStreamViewModel.toggleMute()
+    fun setDesktopAudioEnabled(enabled: Boolean) = audioStreamViewModel.setDesktopAudioEnabled(enabled)
     fun startStream() = audioStreamViewModel.startStream()
     fun stopStream() = audioStreamViewModel.stopStream()
     fun setMode(mode: ConnectionMode) = audioStreamViewModel.setMode(mode)

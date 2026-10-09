@@ -153,13 +153,15 @@ async fn rollback_start(
     )
     .await;
     join_tasks_bounded(tasks, NETWORK_TASK_JOIN_TIMEOUT).await;
+    let downlink_result = state.downlink.shutdown().await;
     state.cancel_token.lock().await.take();
     if let Some(mdns) = state.mdns_manager.lock().await.take() {
         mdns.stop_mdns();
     }
     let mut lifecycle = state.lifecycle.lock().await;
     lifecycle.begin_stopping();
-    lifecycle.join_audio_bounded(AUDIO_JOIN_TIMEOUT).await
+    let audio_result = lifecycle.join_audio_bounded(AUDIO_JOIN_TIMEOUT).await;
+    audio_result.and(downlink_result)
 }
 
 /// Undo a partial start and report both the original failure and any
@@ -281,6 +283,7 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
     let (tcp_ready_tx, tcp_ready_rx) = tokio::sync::oneshot::channel();
     let tcp_task = tokio::spawn(crate::transport::tcp::run_tcp_server(
         crate::transport::tcp::TcpServerConfig {
+            downlink: state.downlink.clone(),
             events: state.events.clone(),
             port,
             bind_address: bind_addr.clone(),
@@ -458,6 +461,7 @@ pub async fn stop_server(state: &ServerState) -> Result<String, String> {
     )
     .await;
     join_tasks_bounded(tasks, NETWORK_TASK_JOIN_TIMEOUT).await;
+    let downlink_result = state.downlink.shutdown().await;
     let audio_result = state
         .lifecycle
         .lock()
@@ -470,6 +474,7 @@ pub async fn stop_server(state: &ServerState) -> Result<String, String> {
         log::warn!("[Server] failed to restore the macOS input device: {e}");
     }
     audio_result?;
+    downlink_result?;
     if !had_token {
         return Err("Server is not running".to_string());
     }

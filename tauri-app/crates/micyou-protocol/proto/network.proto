@@ -12,6 +12,9 @@ message MessageWrapper {
     // Cross-device plugin messaging (see docs/plugins/api-reference.md).
     // Unknown to legacy clients: proto3 skips it, so the wire stays compatible.
     PluginMessage pluginMessage = 7;
+    DownlinkRequestMessage downlinkRequest = 8;
+    DownlinkStateMessage downlinkState = 9;
+    DownlinkAudioMessage downlinkAudio = 10;
 }
 
 // Cross-device plugin message: request/response and one-way events between
@@ -32,6 +35,33 @@ message PluginMessage {
 message ConnectMessage {
     // Zero identifies legacy clients that predate transport session isolation.
     int64 sessionId = 1;
+    bool supportsDownlink = 2;
+}
+
+message DownlinkRequestMessage {
+    int64 sessionId = 1;
+    int64 requestId = 2;
+    bool enabled = 3;
+}
+
+message DownlinkStateMessage {
+    int64 sessionId = 1;
+    int64 requestId = 2;
+    int64 streamId = 3;
+    bool supported = 4;
+    bool active = 5;
+    string error = 6;
+    int32 sampleRate = 7;
+    int32 channelCount = 8;
+    int32 audioFormat = 9;
+}
+
+// Negotiated desktop-to-phone PCM16 LE: 48 kHz, stereo, 20 ms / 3840 bytes.
+message DownlinkAudioMessage {
+    int64 sessionId = 1;
+    int64 streamId = 2;
+    int64 sequenceNumber = 3;
+    bytes pcm = 4;
 }
 
 message MuteMessage {

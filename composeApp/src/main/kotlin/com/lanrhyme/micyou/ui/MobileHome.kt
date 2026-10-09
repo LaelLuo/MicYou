@@ -755,6 +755,7 @@ private fun MobileBottomBar(
         hazeState = hazeState,
         enabled = state.backgroundSettings.enableHazeEffect
     ) {
+        Column {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -785,6 +786,41 @@ private fun MobileBottomBar(
                 modifier = Modifier.size(8.dp).scale(dotPulse)
             ) {}
         }
+        DesktopAudioControl(state, viewModel)
+        }
+    }
+}
+
+@Composable
+private fun DesktopAudioControl(state: AppUiState, viewModel: MainViewModel) {
+    val audio = state.desktopAudio
+    val text = when (audio.phase) {
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Disconnected -> R.string.desktop_audio_disconnected
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Checking -> R.string.desktop_audio_checking
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Unsupported -> R.string.desktop_audio_unsupported
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Ready -> R.string.desktop_audio_ready
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Connecting -> R.string.desktop_audio_connecting
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Playing -> R.string.desktop_audio_playing
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Error -> when (audio.error) {
+            "bluetooth_required", "bluetooth_disconnected", "bluetooth_route_changed", "bluetooth_route_failed" -> R.string.desktop_audio_bluetooth
+            "builtin_microphone_required" -> R.string.desktop_audio_microphone
+            "audio_focus_lost", "audio_focus_denied" -> R.string.desktop_audio_focus
+            "unsupported_android", "unsupported_peer", "unsupported_platform" -> R.string.desktop_audio_unsupported
+            "feedback_source" -> R.string.desktop_audio_feedback
+            "source_unavailable" -> R.string.desktop_audio_source
+            else -> R.string.desktop_audio_failed
+        }
+    }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(stringResource(R.string.desktop_audio_title), style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(text), style = MaterialTheme.typography.bodySmall,
+                color = if (audio.phase == com.lanrhyme.micyou.audio.DesktopAudioPhase.Error) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        androidx.compose.material3.Switch(checked = audio.enabled,
+            onCheckedChange = viewModel::setDesktopAudioEnabled,
+            enabled = state.streamState == StreamState.Streaming && audio.supported)
     }
 }
 

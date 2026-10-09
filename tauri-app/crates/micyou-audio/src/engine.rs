@@ -182,6 +182,8 @@ fn stream_error_callback(
 }
 
 pub struct AudioOutputManager {
+    endpoint_tracker: Option<Arc<std::sync::RwLock<Option<String>>>>,
+    monitor_endpoint_tracker: Option<Arc<std::sync::RwLock<Option<String>>>>,
     stream: Option<cpal::Stream>,
     producer: Option<HeapProd<f32>>,
     resampler: Option<RubatoResampler>,
@@ -246,6 +248,8 @@ impl AudioOutputManager {
     /// output stream immediately without extra plumbing.
     pub fn with_mute_flag(muted: Arc<AtomicBool>) -> Self {
         Self {
+            endpoint_tracker: None,
+            monitor_endpoint_tracker: None,
             stream: None,
             producer: None,
             resampler: None,
@@ -276,6 +280,16 @@ impl AudioOutputManager {
     /// Clone of the shared flag driving the output mute gate.
     pub fn mute_flag(&self) -> Arc<AtomicBool> {
         self.muted.clone()
+    }
+
+    pub fn set_endpoint_tracker(&mut self, tracker: Arc<std::sync::RwLock<Option<String>>>) {
+        self.endpoint_tracker = Some(tracker);
+    }
+    pub fn set_monitor_endpoint_tracker(
+        &mut self,
+        tracker: Arc<std::sync::RwLock<Option<String>>>,
+    ) {
+        self.monitor_endpoint_tracker = Some(tracker);
     }
 
     /// Set the hard-mute state. While muted, the output callbacks drain their
@@ -354,6 +368,16 @@ impl AudioOutputManager {
                     return;
                 }
             };
+            #[cfg(windows)]
+            let monitor_id = match device.id() {
+                Ok(id) => Some(id.id().to_string()),
+                Err(error) => {
+                    log::warn!("[Audio] Monitor endpoint ID unavailable: {error}");
+                    return;
+                }
+            };
+            #[cfg(not(windows))]
+            let monitor_id = None;
 
             self.monitor_device_sample_rate = config.sample_rate();
             self.monitor_device_channels = config.channels() as usize;
@@ -468,15 +492,23 @@ impl AudioOutputManager {
             };
 
             if let Ok(st) = stream {
+                if let Some(tracker) = &self.monitor_endpoint_tracker {
+                    *tracker.write().unwrap_or_else(|p| p.into_inner()) = monitor_id;
+                }
                 if st.play().is_ok() {
                     self.monitor_stream = Some(st);
                     log::info!("[Audio] Audio monitor stream started successfully");
+                } else if let Some(tracker) = &self.monitor_endpoint_tracker {
+                    *tracker.write().unwrap_or_else(|p| p.into_inner()) = None;
                 }
             }
         }
     }
 
     fn stop_monitor_loopback(&mut self) {
+        if let Some(tracker) = &self.monitor_endpoint_tracker {
+            *tracker.write().unwrap_or_else(|p| p.into_inner()) = None;
+        }
         #[cfg(target_os = "linux")]
         {
             if let Some(mut child) = self.pw_loopback_child.take() {
@@ -569,6 +601,11 @@ impl AudioOutputManager {
         };
 
         let device = device.ok_or("No output device available")?;
+        // ID 使用 WASAPI 原始端点标识，与独立采集来源完全一致。
+        #[cfg(windows)]
+        let endpoint_id = Some(device.id()?.id().to_string());
+        #[cfg(not(windows))]
+        let endpoint_id = None;
 
         let config = device.default_output_config()?;
         self.device_sample_rate = config.sample_rate();
@@ -689,7 +726,15 @@ impl AudioOutputManager {
             _ => return Err("Unsupported sample format".into()),
         };
 
-        stream.play()?;
+        if let Some(tracker) = &self.endpoint_tracker {
+            *tracker.write().unwrap_or_else(|p| p.into_inner()) = endpoint_id;
+        }
+        if let Err(error) = stream.play() {
+            if let Some(tracker) = &self.endpoint_tracker {
+                *tracker.write().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+            return Err(error.into());
+        }
         self.stream = Some(stream);
 
         // If monitoring was enabled prior to start, start monitor stream
@@ -726,6 +771,9 @@ impl AudioOutputManager {
         self.stream = None;
         self.producer = None;
         self.resampler = None;
+        if let Some(tracker) = &self.endpoint_tracker {
+            *tracker.write().unwrap_or_else(|p| p.into_inner()) = None;
+        }
     }
 
     pub fn push_audio_data(&mut self, data: &[f32], input_channels: usize) {

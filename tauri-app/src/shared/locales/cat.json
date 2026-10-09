@@ -1,4 +1,35 @@
 {
+  "downlink": {
+    "title": "Computer audio → cat phone",
+    "description": "Enable computer audio on your phone. This source is separate from the phone microphone output. Meow.",
+    "refresh": "Refresh sources",
+    "source": "Computer audio source",
+    "defaultSource": "Follow Windows default playback device",
+    "defaultBadge": "Default",
+    "feedbackBadge": "Microphone output",
+    "missingSource": "Saved source is unavailable",
+    "states": {
+      "error": "Computer audio stopped, meow",
+      "loading": "Updating computer audio…",
+      "unavailable": "Status unavailable",
+      "unsupported": "Computer audio is not supported",
+      "active": "Sending computer audio to phone",
+      "starting": "Starting computer audio…",
+      "idle": "Enable playback on your phone to receive computer audio"
+    },
+    "errors": {
+      "unsupported_platform": "Computer audio is only available on Windows.",
+      "unsupported_peer": "The connected phone does not support computer audio.",
+      "source_unavailable": "The selected playback device is unavailable. Choose another source.",
+      "feedback_source": "This source receives the phone microphone. Choose another source to avoid feedback.",
+      "capture_failed": "Could not capture computer audio. Refresh or choose another source.",
+      "invalid_frame": "Invalid computer audio data. Enable playback again on your phone.",
+      "transport_stalled": "The connection stalled. Reconnect your phone.",
+      "load_failed": "Could not load sources or status. Try refreshing.",
+      "save_failed": "Could not change the source. Try refreshing the current selection.",
+      "unknown": "Computer audio failed. Refresh or choose another source."
+    }
+  },
   "app": {
     "connectionMode": "连接模式喵~ (=^･ω･^=)",
     "port": "端口喵~",

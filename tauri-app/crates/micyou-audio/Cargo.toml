@@ -24,3 +24,4 @@ rustfft = { version = "6.4.1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.25"
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com"] }

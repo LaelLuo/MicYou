@@ -141,6 +141,8 @@ impl Recovery {
 }
 
 pub struct AudioOutputHandle {
+    pub actual_endpoint_id: Arc<std::sync::RwLock<Option<String>>>,
+    pub monitor_endpoint_id: Arc<std::sync::RwLock<Option<String>>>,
     tx: Sender<AudioOutputCommand>,
     /// `f64` bits of the milliseconds queued in the output ring, published by
     /// the device thread on every command and health tick. The audio thread reads it per
@@ -161,10 +163,16 @@ impl AudioOutputHandle {
         let (tx, rx) = mpsc::channel::<AudioOutputCommand>();
         let queued_ms = Arc::new(AtomicU64::new(0));
         let published = queued_ms.clone();
+        let actual_endpoint_id = Arc::new(std::sync::RwLock::new(None));
+        let endpoint_tracker = actual_endpoint_id.clone();
+        let monitor_endpoint_id = Arc::new(std::sync::RwLock::new(None));
+        let monitor_tracker = monitor_endpoint_id.clone();
         let thread = std::thread::Builder::new()
             .name("micyou-output".into())
             .spawn(move || {
                 let mut manager = micyou_audio::AudioOutputManager::with_mute_flag(muted);
+                manager.set_endpoint_tracker(endpoint_tracker);
+                manager.set_monitor_endpoint_tracker(monitor_tracker);
                 let mut recovery = Recovery::default();
                 loop {
                     let cmd = rx.recv_timeout(HEALTH_CHECK_INTERVAL);
@@ -213,6 +221,8 @@ impl AudioOutputHandle {
             .inspect_err(|e| log::error!("[Audio] Failed to spawn the output thread: {e}"))
             .ok();
         Self {
+            actual_endpoint_id,
+            monitor_endpoint_id,
             tx,
             queued_ms,
             thread: std::sync::Mutex::new(thread),

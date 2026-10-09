@@ -14,6 +14,7 @@ plugins {
 val compatLevel = providers.gradleProperty("micyou.androidCompat").orNull?.takeIf { it.isNotBlank() }
 val androidCompat = compatLevel != null
 val isApi21Compat = compatLevel == "api21"
+val duplexBuild = providers.gradleProperty("micyou.duplex").orNull == "true"
 // 预留更低级别，当前未实现
 // val isApi19Compat = compatLevel == "api19"
 
@@ -40,11 +41,13 @@ val aifadianUserId: String = run {
 }
 
 android {
+    sourceSets.getByName("test").resources.srcDir("../tauri-app/crates/micyou-protocol/fixtures")
     namespace = "com.lanrhyme.micyou"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.lanrhyme.micyou"
+        applicationId = if (duplexBuild) "com.laelluo.micyou.duplex" else "com.lanrhyme.micyou"
+        manifestPlaceholders["micyouAppLabel"] = if (duplexBuild) "MicYou Duplex" else "@string/app_name"
         minSdk = (if (androidCompat) libs.versions.compat.android.minSdk.get() else libs.versions.android.minSdk.get()).toInt()
         targetSdk = (if (androidCompat) libs.versions.compat.android.targetSdk.get() else libs.versions.android.targetSdk.get()).toInt()
         versionCode = project.property("project.version.code").toString().toInt()
@@ -195,6 +198,7 @@ if (androidCompat) {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     if (androidCompat) {
         // 兼容模式：MultiDex 库 + core library desugaring
         implementation("androidx.multidex:multidex:${libs.versions.compat.multidex.get()}")

@@ -48,6 +48,23 @@ export interface ModeStatus {
 
 // ---- Audio ----
 
+export interface DownlinkSource {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isFeedback: boolean;
+}
+
+export interface DownlinkStatus {
+  supported: boolean;
+  phoneSupported: boolean;
+  requested: boolean;
+  active: boolean;
+  sourceId: string | null;
+  error: string | null;
+  droppedFrames: number;
+}
+
 export interface EqualizerConfig {
   enabled: boolean;
   preAmp: number;

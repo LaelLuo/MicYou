@@ -1,4 +1,35 @@
 {
+  "downlink": {
+    "title": "電腦之聲 → 手機",
+    "description": "於手機啟電腦之聲。此聲源與手機麥克風輸出各自設之。",
+    "refresh": "重察聲源",
+    "source": "電腦聲源",
+    "defaultSource": "隨 Windows 預設播放裝置",
+    "defaultBadge": "預設",
+    "feedbackBadge": "麥克風輸出",
+    "missingSource": "所存聲源不可用",
+    "states": {
+      "error": "電腦之聲已止",
+      "loading": "正更新電腦之聲…",
+      "unavailable": "暫不得其狀",
+      "unsupported": "不支援電腦之聲",
+      "active": "正傳電腦之聲至手機",
+      "starting": "正啟電腦之聲…",
+      "idle": "於手機啟播放，即可聞電腦之聲"
+    },
+    "errors": {
+      "unsupported_platform": "電腦之聲惟 Windows 可用。",
+      "unsupported_peer": "所連手機不支援電腦之聲。",
+      "source_unavailable": "所選播放裝置不可用，請擇他源。",
+      "feedback_source": "此源收手機麥克風之聲，請擇他源以避回聲。",
+      "capture_failed": "不能擷取電腦之聲，請重察或擇他源。",
+      "invalid_frame": "電腦聲訊有誤，請於手機重啟播放。",
+      "transport_stalled": "傳輸停滯，請重連手機。",
+      "load_failed": "不能讀聲源或其狀，請重察。",
+      "save_failed": "未能更易聲源，請重察其選。",
+      "unknown": "電腦之聲有誤，請重察或擇他源。"
+    }
+  },
   "app": {
     "connectionMode": "连接之法",
     "port": "端口",

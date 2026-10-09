@@ -23,6 +23,49 @@ use micyou_core::server::{service, ServerState};
 use std::sync::Arc;
 use tauri::Manager;
 
+// 在任何工作執行緒與共享設定讀取之前固定便攜版目錄。
+fn prepare_duplex_config(identifier: &str) -> Result<(), String> {
+    if identifier != "com.laelluo.micyou.duplex" {
+        return Ok(());
+    }
+    if std::env::var_os("MICYOU_CONFIG_DIR").is_none_or(|value| value.is_empty()) {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Cannot locate duplex executable: {error}"))?;
+        let directory = executable
+            .parent()
+            .ok_or("Duplex executable has no parent directory")?
+            .join("data");
+        std::env::set_var("MICYOU_CONFIG_DIR", directory);
+    }
+    let directory = micyou_core::config::config_dir();
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Cannot create isolated duplex config: {error}"))?;
+    let path = micyou_core::config::server_prefs_path();
+    let prefs = micyou_core::config::ServerPrefs {
+        port: 18554,
+        web_port: 18443,
+        ..Default::default()
+    };
+    let json = serde_json::to_vec_pretty(&prefs).map_err(|error| error.to_string())?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            if let Err(error) = file.write_all(&json).and_then(|()| file.sync_all()) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(format!("Cannot initialize isolated duplex config: {error}"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("Cannot initialize isolated duplex config: {error}")),
+    }
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     app.manage(TrayContext::default());
@@ -44,6 +87,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(win) = app.get_webview_window("main") {
+        if handle.config().identifier == "com.laelluo.micyou.duplex" {
+            win.set_title("MicYou Duplex")?;
+        }
         window::apply_macos_vibrancy(&win);
         window::apply_rounded_corners(&win);
     }
@@ -58,6 +104,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    if let Err(error) = prepare_duplex_config(&context.config().identifier) {
+        eprintln!("MicYou Duplex startup failed: {error}");
+        std::process::exit(1);
+    }
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -92,6 +143,9 @@ pub fn run() {
             commands::server::set_spectrum_streaming,
             commands::server::exit_app,
             commands::audio::get_audio_devices,
+            commands::audio::list_downlink_sources,
+            commands::audio::get_downlink_status,
+            commands::audio::set_downlink_source,
             commands::audio::update_audio_settings,
             commands::audio::get_audio_settings,
             commands::audio::get_server_prefs,
@@ -148,7 +202,7 @@ pub fn run() {
             commands::plugins::get_plugin_panel,
             commands::plugins::open_plugin_window,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
