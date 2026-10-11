@@ -65,6 +65,13 @@ pub fn get_downlink_status(state: State<'_, ServerState>) -> DownlinkStatus {
 }
 
 #[tauri::command]
+pub async fn retry_playback_route_restore(
+    state: State<'_, ServerState>,
+) -> Result<DownlinkStatus, String> {
+    Ok(state.downlink.retry_route_restore().await)
+}
+
+#[tauri::command]
 pub async fn set_downlink_source(
     state: State<'_, ServerState>,
     source_id: Option<String>,

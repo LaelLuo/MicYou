@@ -801,14 +801,32 @@ private fun DesktopAudioControl(state: AppUiState, viewModel: MainViewModel) {
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Ready -> R.string.desktop_audio_ready
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Connecting -> R.string.desktop_audio_connecting
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Playing -> R.string.desktop_audio_playing
+        com.lanrhyme.micyou.audio.DesktopAudioPhase.Paused -> R.string.desktop_audio_paused
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Error -> when (audio.error) {
             "bluetooth_required", "bluetooth_disconnected", "bluetooth_route_changed", "bluetooth_route_failed" -> R.string.desktop_audio_output
             "builtin_microphone_required" -> R.string.desktop_audio_microphone
-            "audio_focus_lost", "audio_focus_denied" -> R.string.desktop_audio_focus
             "unsupported_android", "unsupported_peer", "unsupported_platform" -> R.string.desktop_audio_unsupported
             "feedback_source" -> R.string.desktop_audio_feedback
             "source_unavailable" -> R.string.desktop_audio_source
+            "output_changed_external" -> R.string.desktop_audio_route_external
+            "route_restore_failed" -> R.string.desktop_audio_route_restore_failed
+            "route_switch_failed" -> R.string.desktop_audio_route_failed
             else -> R.string.desktop_audio_failed
+        }
+    }
+    val routeText = when {
+        audio.supported && !audio.supportsPlaybackRouting -> R.string.desktop_audio_route_unavailable
+        audio.routeState == "restore_failed" -> R.string.desktop_audio_route_restore_failed
+        audio.routeState == "released_external" -> R.string.desktop_audio_route_external
+        audio.routeError.isNotEmpty() -> R.string.desktop_audio_route_failed
+        else -> when (audio.routeState) {
+            "idle" -> R.string.desktop_audio_route_idle
+            "acquiring" -> R.string.desktop_audio_route_acquiring
+            "held" -> R.string.desktop_audio_route_held
+            "restored" -> R.string.desktop_audio_route_restored
+            "restore_failed" -> R.string.desktop_audio_route_restore_failed
+            "released_external" -> R.string.desktop_audio_route_external
+            else -> R.string.desktop_audio_route_pending
         }
     }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -817,10 +835,19 @@ private fun DesktopAudioControl(state: AppUiState, viewModel: MainViewModel) {
             Text(stringResource(text), style = MaterialTheme.typography.bodySmall,
                 color = if (audio.phase == com.lanrhyme.micyou.audio.DesktopAudioPhase.Error) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurfaceVariant)
+            if (audio.supported) Text(stringResource(routeText), style = MaterialTheme.typography.bodySmall,
+                color = if (audio.routeError.isNotEmpty() || audio.routeState == "restore_failed") MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant)
+            if (audio.enabled && audio.phase == com.lanrhyme.micyou.audio.DesktopAudioPhase.Error) {
+                androidx.compose.material3.TextButton(onClick = { viewModel.setDesktopAudioEnabled(true) },
+                    enabled = state.streamState == StreamState.Streaming && audio.supported) {
+                    Text(stringResource(R.string.desktop_audio_retry))
+                }
+            }
         }
         androidx.compose.material3.Switch(checked = audio.enabled,
             onCheckedChange = viewModel::setDesktopAudioEnabled,
-            enabled = state.streamState == StreamState.Streaming && audio.supported)
+            enabled = state.streamState == StreamState.Streaming && (audio.supported || audio.enabled))
     }
 }
 

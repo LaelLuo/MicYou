@@ -80,6 +80,10 @@ export interface DownlinkStatus {
   sourceId: string | null;
   error: string | null;
   droppedFrames: number;
+  supportsPlaybackRouting: boolean;
+  phoneSupportsPlaybackRouting: boolean;
+  routeState: string;
+  routeError: string | null;
 }
 
 export interface EqualizerConfig {

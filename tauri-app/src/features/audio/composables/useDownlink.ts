@@ -52,6 +52,22 @@ export function useDownlink() {
     }
   }
 
+  async function retryRestore() {
+    if (loading.value || saving.value || disposed || status.value?.routeState !== 'restore_failed') return;
+    saving.value = true;
+    operationError.value = null;
+    const revision = eventRevision;
+    try {
+      const snapshot = await command('retry_playback_route_restore');
+      if (!disposed && revision === eventRevision) status.value = snapshot;
+    } catch (error) {
+      if (!disposed && revision === eventRevision) operationError.value = 'route_restore_failed';
+      console.error('Failed to restore computer output:', error);
+    } finally {
+      if (!disposed) saving.value = false;
+    }
+  }
+
   onMounted(async () => {
     let listenerFailed = false;
     try {
@@ -71,5 +87,5 @@ export function useDownlink() {
     if (!disposed && listenerFailed) operationError.value = 'load_failed';
   });
 
-  return { sources, status, loading, saving, operationError, refresh, selectSource };
+  return { sources, status, loading, saving, operationError, refresh, selectSource, retryRestore };
 }

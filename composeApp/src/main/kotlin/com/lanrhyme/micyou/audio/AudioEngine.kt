@@ -690,7 +690,7 @@ class AudioEngine constructor() {
                             Logger.i("AudioEngine", "Handshake successful")
                             val connectBytes = proto.encodeToByteArray(
                                 MessageWrapper.serializer(),
-                                MessageWrapper(connect = ConnectMessage(sessionId, supportsDownlink = true))
+                                MessageWrapper(connect = ConnectMessage(sessionId, supportsDownlink = true, supportsPlaybackRouting = true))
                             )
                             out.writeInt(PACKET_MAGIC)
                             out.writeInt(connectBytes.size)

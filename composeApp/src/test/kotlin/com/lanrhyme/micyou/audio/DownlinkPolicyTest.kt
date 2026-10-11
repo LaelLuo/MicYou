@@ -7,14 +7,45 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DownlinkPolicyTest {
-    @Test fun `only actual audio focus loss requires manual playback recovery`() {
-        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN))
-        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT))
-        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK))
-        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE))
-        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS))
-        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT))
-        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK))
+    @Test fun `communication and unknown modes pause without changing user intent`() {
+        assertFalse(shouldPauseForAudioMode(AudioManager.MODE_NORMAL))
+        assertTrue(shouldPauseForAudioMode(AudioManager.MODE_RINGTONE))
+        assertTrue(shouldPauseForAudioMode(AudioManager.MODE_IN_CALL))
+        assertTrue(shouldPauseForAudioMode(AudioManager.MODE_IN_COMMUNICATION))
+        assertTrue(shouldPauseForAudioMode(999))
+        val gate = DownlinkPolicy(42)
+        gate.setDesired(true)
+        val request = gate.request(true)
+        assertTrue(gate.desiredEnabled)
+        assertTrue(gate.isCurrentRequest(request))
+    }
+
+    @Test fun `fatal stop keeps intent while stopping frames and requiring a new request to retry`() {
+        val gate = DownlinkPolicy(42)
+        gate.setDesired(true)
+        val original = gate.request(true)
+        assertTrue(gate.accepts(active()))
+        val failed = gate.request(false)
+        assertTrue(gate.desiredEnabled)
+        assertFalse(gate.enabled)
+        assertFalse(gate.isCurrentRequest(original))
+        assertEquals(FrameDecision.Drop, gate.frame(frame(100)))
+        assertTrue(gate.accepts(active(request = failed).copy(active = false)))
+        val retry = gate.request(true)
+        assertTrue(gate.isCurrentRequest(retry))
+        assertFalse(gate.accepts(active(request = failed).copy(active = false, routeState = "restored")))
+        assertTrue(gate.accepts(active(request = retry, stream = 3)))
+        gate.setDesired(false)
+        gate.request(false)
+        assertFalse(gate.desiredEnabled)
+        assertFalse(gate.isCurrentRequest(retry))
+    }
+
+    @Test fun `playback errors use controlled codes rather than platform exception messages`() {
+        assertEquals("playback_failed", playbackErrorCode("native exception with sensitive detail"))
+        assertEquals("playback_failed", playbackErrorCode(null))
+        assertEquals("builtin_microphone_required", playbackErrorCode("builtin_microphone_required"))
+        assertEquals("invalid_frame", playbackErrorCode("invalid_frame"))
     }
 
     private fun active(request: Long = 1, stream: Long = 2) = DownlinkStateMessage(

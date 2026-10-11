@@ -14,7 +14,7 @@
     "detectFailed": "Could not check component identity. Refresh to retry.",
     "componentHint": "Ordinary VB-CABLE carries your microphone; Hi-Fi Cable carries computer audio. Detection alone does not verify audio isolation.",
     "downloadHifi": "Download Hi-Fi Cable from VB-Audio",
-    "setupHint": "Download the two packages separately from VB-Audio. Install manually as administrator and restart when prompted. Set Windows playback to Hi-Fi Cable Input, use the same source in MicYou, and set recording apps to ordinary CABLE Output. Set both Hi-Fi endpoints to 48 kHz. Save and restore your previous defaults if needed.",
+    "setupHint": "Install ordinary VB-CABLE and Hi-Fi Cable separately. Set both Hi-Fi endpoints to 48 kHz. Select Hi-Fi Cable Input as the fixed computer audio source in MicYou, and ordinary CABLE Output in recording apps. First select your usual speakers as Windows default playback and let apps follow the default. The phone switch then changes computer output automatically and restores it when disabled or disconnected.",
     "aec": {
       "preparing": "Echo cancellation enabled; preparing a fresh reference.",
       "monitor_conflict": "Monitoring is on; echo cancellation is paused.",
@@ -23,6 +23,17 @@
     }
   },
   "downlink": {
+    "errorDetails": "Output routing error details",
+    "retryRestore": "Retry restoring computer output",
+    "routes": {
+      "idle": "The phone switch changes computer output and restores it when disabled.",
+      "acquiring": "Switching computer output…",
+      "held": "Computer output is routed to your phone; disabling playback restores it.",
+      "restored": "Computer output restored.",
+      "restore_failed": "Computer output is not restored. Resolve the issue and retry.",
+      "released_external": "Computer output was changed manually. Automatic routing stopped.",
+      "unsupported_peer": "This phone version cannot switch computer output automatically. Update the phone app."
+    },
     "title": "Computer audio → phone",
     "description": "Enable computer audio on your phone. This source is separate from the phone microphone output.",
     "refresh": "Refresh sources",
@@ -41,6 +52,17 @@
       "idle": "Enable playback on your phone to receive computer audio"
     },
     "errors": {
+      "route_source_required": "Automatic switching needs a fixed independent virtual output. Select Hi-Fi Cable Input.",
+      "route_restore_required": "The previous computer output has not been restored. Retry restoration first.",
+      "route_acquire_failed": "Could not switch computer output. Check playback devices and retry on your phone.",
+      "route_changed_external": "Computer output was changed manually. Retry on your phone to route it back.",
+      "route_busy": "Another MicYou instance controls computer output. Stop its playback first.",
+      "route_restore_target_required": "Windows already uses this virtual output. Select your usual speakers before enabling playback on your phone.",
+      "route_unavailable": "Automatic output switching is unavailable. Check devices and retry.",
+      "playback_failed": "Playback failed on your phone. Check the phone message and retry.",
+      "builtin_microphone_required": "The phone's built-in microphone is unavailable. Check the phone message.",
+      "unsupported_android": "This Android version cannot play computer audio.",
+      "route_restore_failed": "Computer output could not be restored. Retry, or select an available output in Windows sound settings and try again.",
       "unsupported_platform": "Computer audio is only available on Windows.",
       "unsupported_peer": "The connected phone does not support computer audio.",
       "source_unavailable": "The selected playback device is unavailable. Choose another source.",

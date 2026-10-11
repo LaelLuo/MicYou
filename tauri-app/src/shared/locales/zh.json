@@ -14,7 +14,7 @@
     "detectFailed": "无法核验组件身份，请刷新重试。",
     "componentHint": "普通 VB-CABLE 传送手机麦克风，Hi-Fi Cable 传送电脑声音。设备检测不代表音频隔离已验收。",
     "downloadHifi": "从 VB-Audio 官网下载 Hi-Fi Cable",
-    "setupHint": "从 VB-Audio 官网分别下载两份组件包，以管理员权限手动安装，按提示安排重启。Windows 播放选 Hi-Fi Cable Input，MicYou 下行选同一来源，录音应用选普通 CABLE Output；HIFI 两端均设为 48 kHz。安装前保存默认设置，需要时恢复。",
+    "setupHint": "分别安装普通 VB-CABLE 与 Hi-Fi Cable，HIFI 两端设为 48 kHz。MicYou 电脑声音来源固定选择 Hi-Fi Cable Input，录音应用选普通 CABLE Output。Windows 默认播放先选平时使用的扬声器，应用输出跟随默认；手机开启播放后自动切换，关闭或断线后恢复。",
     "aec": {
       "preparing": "回声消除已启用，正在准备新参考。",
       "monitor_conflict": "耳返开启，回声消除暂停。",
@@ -23,6 +23,17 @@
     }
   },
   "downlink": {
+    "errorDetails": "输出恢复错误详情",
+    "retryRestore": "重试恢复电脑输出",
+    "routes": {
+      "idle": "手机开关会自动切换电脑输出，关闭后恢复。",
+      "acquiring": "正在切换电脑输出…",
+      "held": "电脑输出已转到手机，关闭播放后恢复。",
+      "restored": "电脑输出已恢复。",
+      "restore_failed": "电脑输出尚未恢复，请处理后重试。",
+      "released_external": "电脑输出已被手动更改，已停止自动切换。",
+      "unsupported_peer": "此手机版本不支持自动切换，请更新手机端。"
+    },
     "title": "电脑声音 → 手机",
     "description": "在手机开启电脑声音接收。此来源与手机麦克风输出设备分别设置。",
     "refresh": "刷新来源",
@@ -41,6 +52,17 @@
       "idle": "在手机开启播放，即可接收电脑声音"
     },
     "errors": {
+      "route_source_required": "自动切换需要固定的独立虚拟输出，请选择 Hi-Fi Cable Input。",
+      "route_restore_required": "上次电脑输出尚未恢复，请先重试恢复。",
+      "route_acquire_failed": "无法切换电脑输出。请核对播放设备并在手机重试。",
+      "route_changed_external": "电脑输出已被手动更改。需要转回手机时，请在手机重试。",
+      "route_busy": "另一份 MicYou 正在控制电脑输出，请先结束其播放。",
+      "route_restore_target_required": "Windows 当前已使用此虚拟输出。请先选择平时使用的扬声器，再在手机开启播放。",
+      "route_unavailable": "自动切换电脑输出暂不可用，请核对设备后重试。",
+      "playback_failed": "手机播放失败。请查看手机提示并重试。",
+      "builtin_microphone_required": "手机内置麦克风不可用，请查看手机提示。",
+      "unsupported_android": "此 Android 版本不支持电脑声音播放。",
+      "route_restore_failed": "电脑输出恢复失败。请重试恢复，或在 Windows 声音设置中选择可用输出后再试。",
       "unsupported_platform": "电脑声音仅支持 Windows。",
       "unsupported_peer": "已连接的手机不支持电脑声音。",
       "source_unavailable": "所选播放设备不可用，请选择其他来源。",

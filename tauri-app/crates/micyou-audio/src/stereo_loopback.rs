@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             unsafe { copy_capture_packet(ptr, 0, 2, 8, false) }.unwrap(),
-            vec![]
+            Vec::<u8>::new()
         );
         let samples = [0u8, 0, 128, 63, 0, 0, 128, 191];
         assert_eq!(

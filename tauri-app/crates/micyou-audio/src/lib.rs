@@ -20,6 +20,7 @@ pub mod engine;
 pub mod endpoint;
 pub mod loopback;
 pub mod mixer;
+pub mod playback_route;
 pub mod stereo_loopback;
 
 pub use aec::AecFailure;

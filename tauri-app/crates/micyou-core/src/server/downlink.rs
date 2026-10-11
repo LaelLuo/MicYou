@@ -1,6 +1,10 @@
 //! 下行生命周期独立于手机麦克风上行；所有发布检查连接与流代际。
 #[cfg(test)]
+mod route_tests;
+mod routing;
+#[cfg(test)]
 pub(crate) mod tests;
+mod worker;
 use crate::events::SharedEvents;
 use micyou_audio::stereo_loopback;
 use micyou_protocol::micyou::{
@@ -33,6 +37,10 @@ pub struct DownlinkStatus {
     pub source_id: Option<String>,
     pub error: Option<String>,
     pub dropped_frames: u64,
+    pub supports_playback_routing: bool,
+    pub phone_supports_playback_routing: bool,
+    pub route_state: String,
+    pub route_error: Option<String>,
 }
 
 struct Session {
@@ -43,6 +51,12 @@ struct Session {
     control: mpsc::Sender<MessageWrapper>,
     audio: mpsc::Sender<MessageWrapper>,
     cancel: CancellationToken,
+    supports_routing: bool,
+}
+pub struct DownlinkPeer {
+    pub session_id: i64,
+    pub supports_downlink: bool,
+    pub supports_routing: bool,
 }
 struct Inner {
     capture_source: Option<String>,
@@ -57,9 +71,19 @@ pub struct DownlinkController {
     operation: tokio::sync::Mutex<()>,
     events: SharedEvents,
     output: Vec<Arc<RwLock<Option<String>>>>,
+    route: Arc<dyn routing::RouteLease>,
 }
 impl DownlinkController {
     pub fn new(events: SharedEvents, output: Vec<Arc<RwLock<Option<String>>>>) -> Arc<Self> {
+        let route = routing::new_lease();
+        Self::with_route(events, output, route)
+    }
+    fn with_route(
+        events: SharedEvents,
+        output: Vec<Arc<RwLock<Option<String>>>>,
+        route: Arc<dyn routing::RouteLease>,
+    ) -> Arc<Self> {
+        let supports_playback_routing = route.supported();
         Arc::new(Self {
             identity: micyou_audio::endpoint::resolve_endpoint_identity,
             inner: Mutex::new(Inner {
@@ -72,6 +96,10 @@ impl DownlinkController {
                     source_id: crate::config::load_server_prefs().downlink_source_id,
                     error: None,
                     dropped_frames: 0,
+                    supports_playback_routing,
+                    phone_supports_playback_routing: false,
+                    route_state: "idle".into(),
+                    route_error: None,
                 },
                 session: None,
                 stop: None,
@@ -80,6 +108,7 @@ impl DownlinkController {
             operation: tokio::sync::Mutex::new(()),
             events,
             output,
+            route,
         })
     }
     pub fn status(&self) -> DownlinkStatus {
@@ -160,6 +189,9 @@ impl DownlinkController {
                 sample_rate: micyou_protocol::DOWNLINK_SAMPLE_RATE,
                 channel_count: micyou_protocol::DOWNLINK_CHANNEL_COUNT,
                 audio_format: micyou_protocol::DOWNLINK_AUDIO_FORMAT,
+                supports_playback_routing: inner.status.supports_playback_routing,
+                route_state: inner.status.route_state.clone(),
+                route_error: inner.status.route_error.clone().unwrap_or_default(),
             }),
             ..Default::default()
         };
@@ -171,11 +203,25 @@ impl DownlinkController {
     async fn stop_worker(&self) -> Result<(), String> {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            // 停止也结束流代际：关闭请求不启动新worker，旧完成回调仍不能污染它。
+            if inner.stop.is_some() || inner.thread.is_some() || inner.status.active {
+                if let Some(session) = inner.session.as_mut() {
+                    if let Some(stream) = session.stream_id.checked_add(1) {
+                        session.stream_id = stream;
+                    } else {
+                        session.cancel.cancel();
+                    }
+                }
+            }
             if let Some(stop) = inner.stop.take() {
                 stop.store(true, Ordering::Release);
             }
             inner.status.active = false;
             inner.capture_source = None;
+        }
+        // 先阻断当前代并恢复路由；采集线程停止超时不能把系统留在虚拟输出。
+        if self.status().route_state != "restore_failed" {
+            self.release_route().await;
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
@@ -201,16 +247,21 @@ impl DownlinkController {
             .unwrap_or_else(|p| p.into_inner())
             .thread
             .take();
-        match thread {
-            Some(thread) => thread.join().map_err(|_| "capture_failed".into()),
+        let result = match thread {
+            Some(thread) => thread.join().map_err(|_| "capture_failed".to_string()),
             None => Ok(()),
+        };
+        result?;
+        if self.status().route_state == "restore_failed" {
+            Err("route_restore_required".into())
+        } else {
+            Ok(())
         }
     }
     pub async fn attach(
         self: &Arc<Self>,
         connection_id: u64,
-        session_id: i64,
-        supported: bool,
+        peer: DownlinkPeer,
         control: mpsc::Sender<MessageWrapper>,
         audio: mpsc::Sender<MessageWrapper>,
         cancel: CancellationToken,
@@ -220,14 +271,17 @@ impl DownlinkController {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.session = Some(Session {
             connection_id,
-            session_id,
+            session_id: peer.session_id,
             request_id: 0,
             stream_id: 0,
             control,
             audio,
             cancel,
+            supports_routing: peer.supports_routing,
         });
-        inner.status.phone_supported = supported && session_id > 0;
+        inner.status.phone_supported = peer.supports_downlink && peer.session_id > 0;
+        inner.status.phone_supports_playback_routing =
+            peer.supports_routing && inner.status.phone_supported;
         inner.status.requested = false;
         inner.status.dropped_frames = 0;
         inner.status.error = if !inner.status.supported {
@@ -254,6 +308,7 @@ impl DownlinkController {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.session = None;
         inner.status.phone_supported = false;
+        inner.status.phone_supports_playback_routing = false;
         inner.status.requested = false;
         inner.status.error = None;
         self.publish(&inner);
@@ -264,12 +319,19 @@ impl DownlinkController {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.session = None;
         inner.status.phone_supported = false;
+        inner.status.phone_supports_playback_routing = false;
         inner.status.requested = false;
         inner.status.error = result.as_ref().err().cloned();
         self.publish(&inner);
         result
     }
     pub async fn request(self: &Arc<Self>, connection_id: u64, request: DownlinkRequestMessage) {
+        // reader future可被断线select取消；已经开始的路由事务必须完整结束。
+        let controller = self.clone();
+        let _ = tokio::spawn(async move { controller.apply_request(connection_id, request).await })
+            .await;
+    }
+    async fn apply_request(self: &Arc<Self>, connection_id: u64, request: DownlinkRequestMessage) {
         let _gate = self.operation.lock().await;
         {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -285,7 +347,14 @@ impl DownlinkController {
             {
                 return;
             }
+            if request.enabled && !request.playback_error.is_empty() {
+                return;
+            }
             session.request_id = request.request_id;
+            if request.enabled && inner.status.requested && inner.status.active {
+                self.publish(&inner);
+                return;
+            }
             inner.status.requested = request.enabled;
         }
         if let Err(error) = self.stop_worker().await {
@@ -296,7 +365,7 @@ impl DownlinkController {
             self.start_worker();
         } else {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-            inner.status.error = None;
+            inner.status.error = routing::playback_error(&request.playback_error);
             self.publish(&inner);
         }
     }
@@ -350,7 +419,7 @@ impl DownlinkController {
         inner.status.error = Some(error);
         self.publish(&inner);
     }
-    pub fn transport_failed(&self, connection: u64) {
+    pub fn transport_failed(self: &Arc<Self>, connection: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner
             .session
@@ -363,53 +432,14 @@ impl DownlinkController {
             inner.status.active = false;
             inner.status.error = Some("transport_stalled".into());
             self.events.downlink_status_changed(inner.status.clone());
-        }
-    }
-    fn start_worker(self: &Arc<Self>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        if !inner.status.supported {
-            inner.status.error = Some("unsupported_platform".into());
-            self.publish(&inner);
-            return;
-        }
-        let source = inner.status.source_id.clone();
-        let Some(session) = inner.session.as_mut() else {
-            return;
-        };
-        let Some(stream_id) = session.stream_id.checked_add(1) else {
-            session.cancel.cancel();
-            return;
-        };
-        session.stream_id = stream_id;
-        let connection_id = session.connection_id;
-        let session_id = session.session_id;
-        let audio = session.audio.clone();
-        let cancel = session.cancel.clone();
-        inner.status.active = false;
-        inner.status.error = None;
-        let stop = Arc::new(AtomicBool::new(false));
-        inner.stop = Some(stop.clone());
-        let controller = self.clone();
-        let handle = std::thread::Builder::new()
-            .name("micyou-downlink".into())
-            .spawn(move || {
-                controller.capture_worker(
-                    connection_id,
-                    session_id,
-                    stream_id,
-                    source,
-                    stop,
-                    cancel,
-                    audio,
-                );
+            let stream = inner.session.as_ref().unwrap().stream_id;
+            drop(inner);
+            let controller = self.clone();
+            tokio::spawn(async move {
+                controller
+                    .finish_worker(connection, stream, Some("transport_stalled".into()))
+                    .await;
             });
-        match handle {
-            Ok(thread) => inner.thread = Some(thread),
-            Err(error) => {
-                log::error!("[Downlink] spawn failed: {error}");
-                inner.status.error = Some("capture_failed".into());
-                self.publish(&inner);
-            }
         }
     }
     fn generation_matches(inner: &Inner, connection: u64, stream: i64) -> bool {
@@ -434,104 +464,5 @@ impl DownlinkController {
                 .capture_source
                 .as_ref()
                 .is_some_and(|id| self.source_error(id).is_none())
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn capture_worker(
-        self: Arc<Self>,
-        connection: u64,
-        session: i64,
-        stream: i64,
-        source: Option<String>,
-        stop: Arc<AtomicBool>,
-        cancel: CancellationToken,
-        audio: mpsc::Sender<MessageWrapper>,
-    ) {
-        let endpoints = stereo_loopback::list_render_endpoints();
-        let endpoint = endpoints.ok().and_then(|sources| {
-            sources
-                .into_iter()
-                .find(|s| source.as_ref().map_or(s.is_default, |id| id == &s.id))
-        });
-        let result = if let Some(endpoint) = endpoint {
-            let mut sequence = 0i64;
-            stereo_loopback::capture(
-                &endpoint.id,
-                stop.clone(),
-                || {
-                    if stop.load(Ordering::Acquire) || cancel.is_cancelled() {
-                        return Err("cancelled".into());
-                    }
-                    if let Some(error) = self.source_error(&endpoint.id) {
-                        return Err(error.into());
-                    }
-                    if source.is_none() {
-                        let default = micyou_audio::endpoint::default_render_endpoint_id()?;
-                        if !default.eq_ignore_ascii_case(&endpoint.id) {
-                            return Err("source_unavailable".into());
-                        }
-                    }
-                    Ok(())
-                },
-                || {
-                    let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    if Self::generation_matches(&inner, connection, stream) {
-                        inner.capture_source = Some(endpoint.id.clone());
-                        inner.status.active = true;
-                        inner.status.error = None;
-                        self.publish(&inner);
-                    }
-                },
-                |pcm| {
-                    let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    if !Self::generation_matches(&inner, connection, stream) {
-                        return;
-                    }
-                    let message = MessageWrapper {
-                        downlink_audio: Some(DownlinkAudioMessage {
-                            session_id: session,
-                            stream_id: stream,
-                            sequence_number: sequence,
-                            pcm,
-                        }),
-                        ..Default::default()
-                    };
-                    sequence = sequence.saturating_add(1);
-                    match audio.try_send(message) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            inner.status.dropped_frames =
-                                inner.status.dropped_frames.saturating_add(1);
-                            // 每秒至多发布一次统计，避免音频队列挤压控制队列。
-                            if inner.status.dropped_frames % 50 == 1 {
-                                self.events.downlink_status_changed(inner.status.clone());
-                            }
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            stop.store(true, Ordering::Release);
-                            cancel.cancel();
-                        }
-                    }
-                },
-            )
-        } else {
-            Err("source_unavailable".into())
-        };
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        if Self::generation_matches(&inner, connection, stream) {
-            inner.status.active = false;
-            inner.status.error = result.err().filter(|e| e != "cancelled").map(|error| {
-                log::warn!("[Downlink] capture ended: {error}");
-                if error == "feedback_source"
-                    || error == "source_unavailable"
-                    || error == "identity_unavailable"
-                {
-                    error
-                } else {
-                    "capture_failed".into()
-                }
-            });
-            stop.store(true, Ordering::Release);
-            self.publish(&inner);
-        }
     }
 }

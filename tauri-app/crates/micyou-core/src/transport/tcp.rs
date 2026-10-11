@@ -521,11 +521,19 @@ async fn handle_client(
         Some(connect) => ExpectedAudioSession::Bound(connect.session_id),
         None => ExpectedAudioSession::UnboundLegacy,
     };
-    let (downlink_session, downlink_supported) = first_message
+    let downlink_peer = first_message
         .connect
         .as_ref()
-        .map(|c| (c.session_id, c.supports_downlink))
-        .unwrap_or((0, false));
+        .map(|c| crate::server::downlink::DownlinkPeer {
+            session_id: c.session_id,
+            supports_downlink: c.supports_downlink,
+            supports_routing: c.supports_playback_routing,
+        })
+        .unwrap_or(crate::server::downlink::DownlinkPeer {
+            session_id: 0,
+            supports_downlink: false,
+            supports_routing: false,
+        });
 
     #[cfg(windows)]
     let raw: RawSocketHandle = std::os::windows::io::AsRawSocket::as_raw_socket(&socket);
@@ -598,8 +606,7 @@ async fn handle_client(
     downlink
         .attach(
             connection_id,
-            downlink_session,
-            downlink_supported,
+            downlink_peer,
             tx.clone(),
             downlink_tx,
             takeover_token.clone(),
@@ -727,11 +734,11 @@ async fn handle_client(
             .await
             .map_err(|_| IoError::new(ErrorKind::TimedOut, "control frame read timed out"))??;
 
-            let message = MessageWrapper::decode(frame_result.as_slice())?;
+            let mut message = MessageWrapper::decode(frame_result.as_slice())?;
             if takeover_token.is_cancelled() {
                 break;
             }
-            if let Some(request) = message.downlink_request {
+            if let Some(request) = message.downlink_request.take() {
                 downlink.request(connection_id, request).await;
             }
             handle_message(
@@ -961,6 +968,7 @@ mod tests {
                 connect: Some(micyou_protocol::micyou::ConnectMessage {
                     session_id: 41,
                     supports_downlink: true,
+                    supports_playback_routing: false,
                 }),
                 ..Default::default()
             },
@@ -988,6 +996,7 @@ mod tests {
                     session_id: 41,
                     request_id: 1,
                     enabled: true,
+                    playback_error: String::new(),
                 }),
                 ..Default::default()
             },
@@ -996,7 +1005,11 @@ mod tests {
         .unwrap();
         let failed = read_test_state(&mut socket).await;
         assert!(!failed.active);
-        assert_eq!((failed.request_id, failed.stream_id), (1, 1));
+        // 首次采集尝试为stream1；失败清理结束该代并以stream2拒绝迟到音频/错误。
+        assert_eq!(
+            (failed.session_id, failed.request_id, failed.stream_id),
+            (41, 1, 2)
+        );
         #[cfg(windows)]
         assert_eq!(failed.error, "source_unavailable");
         #[cfg(not(windows))]
@@ -1008,6 +1021,7 @@ mod tests {
                     session_id: 41,
                     request_id: 2,
                     enabled: false,
+                    playback_error: String::new(),
                 }),
                 ..Default::default()
             },
@@ -1016,9 +1030,15 @@ mod tests {
         .unwrap();
         let stopped = read_test_state(&mut socket).await;
         assert_eq!(
-            (stopped.request_id, stopped.stream_id, stopped.active),
-            (2, failed.stream_id, false)
+            (
+                stopped.session_id,
+                stopped.request_id,
+                stopped.stream_id,
+                stopped.active
+            ),
+            (41, 2, 2, false)
         );
+        assert!(stopped.error.is_empty());
         write_frame(
             &mut socket,
             MessageWrapper {

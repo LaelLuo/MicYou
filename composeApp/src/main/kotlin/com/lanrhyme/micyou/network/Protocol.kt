@@ -103,7 +103,8 @@ data class ConnectMessage(
     @ProtoNumber(1)
     val sessionId: Long = 0,
     @ProtoNumber(2)
-    val supportsDownlink: Boolean = false
+    val supportsDownlink: Boolean = false,
+    @ProtoNumber(3) val supportsPlaybackRouting: Boolean = false
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -111,7 +112,8 @@ data class ConnectMessage(
 data class DownlinkRequestMessage(
     @ProtoNumber(1) val sessionId: Long = 0,
     @ProtoNumber(2) val requestId: Long = 0,
-    @ProtoNumber(3) val enabled: Boolean = false
+    @ProtoNumber(3) val enabled: Boolean = false,
+    @ProtoNumber(4) val playbackError: String = ""
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -125,7 +127,10 @@ data class DownlinkStateMessage(
     @ProtoNumber(6) val error: String = "",
     @ProtoNumber(7) val sampleRate: Int = 0,
     @ProtoNumber(8) val channelCount: Int = 0,
-    @ProtoNumber(9) val audioFormat: Int = 0
+    @ProtoNumber(9) val audioFormat: Int = 0,
+    @ProtoNumber(10) val supportsPlaybackRouting: Boolean = false,
+    @ProtoNumber(11) val routeState: String = "",
+    @ProtoNumber(12) val routeError: String = ""
 )
 
 @OptIn(ExperimentalSerializationApi::class)

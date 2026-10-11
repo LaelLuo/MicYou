@@ -62,6 +62,36 @@ mod tests {
     struct LegacyWrapper {
         #[prost(message, optional, tag = "2")]
         connect: Option<LegacyConnect>,
+        #[prost(message, optional, tag = "8")]
+        request: Option<LegacyRequest>,
+        #[prost(message, optional, tag = "9")]
+        state: Option<LegacyState>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyRequest {
+        #[prost(int64, tag = "1")]
+        session_id: i64,
+        #[prost(int64, tag = "2")]
+        request_id: i64,
+        #[prost(bool, tag = "3")]
+        enabled: bool,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyState {
+        #[prost(int64, tag = "1")]
+        session_id: i64,
+        #[prost(int64, tag = "2")]
+        request_id: i64,
+        #[prost(int64, tag = "3")]
+        stream_id: i64,
+        #[prost(bool, tag = "4")]
+        supported: bool,
+        #[prost(bool, tag = "5")]
+        active: bool,
+        #[prost(string, tag = "6")]
+        error: String,
     }
 
     #[test]
@@ -92,6 +122,7 @@ mod tests {
                 session_id: 42,
                 request_id: 1,
                 enabled: true,
+                playback_error: String::new(),
             })
         );
         assert_eq!(request.encode_to_vec(), request_bytes);
@@ -110,6 +141,9 @@ mod tests {
                 sample_rate: DOWNLINK_SAMPLE_RATE,
                 channel_count: DOWNLINK_CHANNEL_COUNT,
                 audio_format: DOWNLINK_AUDIO_FORMAT,
+                supports_playback_routing: false,
+                route_state: String::new(),
+                route_error: String::new(),
             })
         );
         assert_eq!(state.encode_to_vec(), state_bytes);
@@ -134,5 +168,77 @@ mod tests {
         let mut bytes = fixture("audioWireSample");
         bytes.pop();
         assert!(MessageWrapper::decode(bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn playback_routing_fixtures_roundtrip_and_old_peer_keeps_the_stop_semantics() {
+        let connect_bytes = fixture("routingConnect");
+        let connect = MessageWrapper::decode(connect_bytes.as_slice()).unwrap();
+        assert_eq!(
+            connect.connect,
+            Some(ConnectMessage {
+                session_id: 42,
+                supports_downlink: true,
+                supports_playback_routing: true,
+            })
+        );
+        assert_eq!(connect.encode_to_vec(), connect_bytes);
+        assert_eq!(
+            LegacyWrapper::decode(connect_bytes.as_slice())
+                .unwrap()
+                .connect
+                .unwrap()
+                .session_id,
+            42
+        );
+
+        let request_bytes = fixture("playbackErrorRequest");
+        let request = MessageWrapper::decode(request_bytes.as_slice()).unwrap();
+        assert_eq!(
+            request.downlink_request,
+            Some(DownlinkRequestMessage {
+                session_id: 42,
+                request_id: 3,
+                enabled: false,
+                playback_error: "playback_failed".into(),
+            })
+        );
+        assert_eq!(request.encode_to_vec(), request_bytes);
+        let old = LegacyWrapper::decode(request_bytes.as_slice())
+            .unwrap()
+            .request
+            .unwrap();
+        assert_eq!(
+            (old.session_id, old.request_id, old.enabled),
+            (42, 3, false)
+        );
+
+        let state_bytes = fixture("routingFailedState");
+        let state = MessageWrapper::decode(state_bytes.as_slice()).unwrap();
+        assert_eq!(
+            state.downlink_state,
+            Some(DownlinkStateMessage {
+                session_id: 42,
+                request_id: 3,
+                stream_id: 2,
+                supported: true,
+                active: false,
+                error: "playback_failed".into(),
+                sample_rate: 48_000,
+                channel_count: 2,
+                audio_format: 2,
+                supports_playback_routing: true,
+                route_state: "restore_failed".into(),
+                route_error: "route_restore_failed".into(),
+            })
+        );
+        assert_eq!(state.encode_to_vec(), state_bytes);
+        let old = LegacyWrapper::decode(state_bytes.as_slice())
+            .unwrap()
+            .state
+            .unwrap();
+        assert_eq!((old.session_id, old.request_id, old.stream_id), (42, 3, 2));
+        assert!(old.supported && !old.active);
+        assert_eq!(old.error, "playback_failed");
     }
 }

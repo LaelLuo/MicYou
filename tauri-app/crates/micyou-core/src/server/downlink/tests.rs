@@ -38,6 +38,14 @@ fn controller() -> Arc<DownlinkController> {
     controller
 }
 
+fn peer(session_id: i64, supports_downlink: bool) -> DownlinkPeer {
+    DownlinkPeer {
+        session_id,
+        supports_downlink,
+        supports_routing: false,
+    }
+}
+
 #[test]
 fn virtual_line_admission_and_physical_endpoint_policy_share_one_check() {
     use micyou_audio::endpoint::{Component, OutputEndpoint};
@@ -110,7 +118,7 @@ async fn worker_panic_is_bounded_and_shutdown_still_clears_session() {
     let (control, _rx) = mpsc::channel(10);
     let (audio, _audio_rx) = mpsc::channel(5);
     controller
-        .attach(1, 10, true, control, audio, CancellationToken::new())
+        .attach(1, peer(10, true), control, audio, CancellationToken::new())
         .await;
     {
         let mut inner = controller.inner.lock().unwrap();
@@ -183,8 +191,7 @@ async fn legacy_never_receives_new_frames_and_reconnect_resets_request() {
     controller
         .attach(
             1,
-            1,
-            false,
+            peer(1, false),
             control.clone(),
             audio.clone(),
             CancellationToken::new(),
@@ -198,12 +205,13 @@ async fn legacy_never_receives_new_frames_and_reconnect_resets_request() {
                 session_id: 1,
                 request_id: 1,
                 enabled: true,
+                playback_error: String::new(),
             },
         )
         .await;
     assert!(!controller.status().requested);
     controller
-        .attach(2, 2, true, control, audio, CancellationToken::new())
+        .attach(2, peer(2, true), control, audio, CancellationToken::new())
         .await;
     let state = rx.recv().await.unwrap().downlink_state.unwrap();
     assert_eq!(
@@ -223,7 +231,7 @@ async fn stale_request_and_old_cleanup_cannot_change_new_connection() {
     let (control, mut rx) = mpsc::channel(10);
     let (audio, _) = mpsc::channel(5);
     controller
-        .attach(2, 20, true, control, audio, CancellationToken::new())
+        .attach(2, peer(20, true), control, audio, CancellationToken::new())
         .await;
     rx.recv().await.unwrap();
     controller
@@ -233,6 +241,7 @@ async fn stale_request_and_old_cleanup_cannot_change_new_connection() {
                 session_id: 20,
                 request_id: 2,
                 enabled: false,
+                playback_error: String::new(),
             },
         )
         .await;
@@ -245,6 +254,7 @@ async fn stale_request_and_old_cleanup_cannot_change_new_connection() {
                 session_id: 20,
                 request_id: 1,
                 enabled: true,
+                playback_error: String::new(),
             },
         )
         .await;
@@ -255,6 +265,7 @@ async fn stale_request_and_old_cleanup_cannot_change_new_connection() {
                 session_id: 19,
                 request_id: 3,
                 enabled: true,
+                playback_error: String::new(),
             },
         )
         .await;
@@ -271,7 +282,7 @@ async fn old_generation_and_changed_output_endpoint_cannot_send_audio() {
     let (control, _) = mpsc::channel(10);
     let (audio, _) = mpsc::channel(5);
     controller
-        .attach(2, 20, true, control, audio, CancellationToken::new())
+        .attach(2, peer(20, true), control, audio, CancellationToken::new())
         .await;
     {
         let mut inner = controller.inner.lock().unwrap();

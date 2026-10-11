@@ -36,12 +36,15 @@ message ConnectMessage {
     // Zero identifies legacy clients that predate transport session isolation.
     int64 sessionId = 1;
     bool supportsDownlink = 2;
+    bool supportsPlaybackRouting = 3;
 }
 
 message DownlinkRequestMessage {
     int64 sessionId = 1;
     int64 requestId = 2;
     bool enabled = 3;
+    // 仅停止请求可携带，用于区分播放故障与用户主动关闭。
+    string playbackError = 4;
 }
 
 message DownlinkStateMessage {
@@ -54,6 +57,9 @@ message DownlinkStateMessage {
     int32 sampleRate = 7;
     int32 channelCount = 8;
     int32 audioFormat = 9;
+    bool supportsPlaybackRouting = 10;
+    string routeState = 11;
+    string routeError = 12;
 }
 
 // Negotiated desktop-to-phone PCM16 LE: 48 kHz, stereo, 20 ms / 3840 bytes.

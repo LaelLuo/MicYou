@@ -14,7 +14,7 @@
     "detectFailed": "無法核驗元件身分，請重新整理重試。",
     "componentHint": "普通 VB-CABLE 傳送手機麥克風，Hi-Fi Cable 傳送電腦聲音。裝置偵測不代表音訊隔離已驗收。",
     "downloadHifi": "從 VB-Audio 官網下載 Hi-Fi Cable",
-    "setupHint": "從 VB-Audio 官網分別下載兩份元件包，以管理員權限手動安裝，按提示安排重新啟動。Windows 播放選 Hi-Fi Cable Input，MicYou 下行選同一來源，錄音應用選普通 CABLE Output；HIFI 兩端均設為 48 kHz。安裝前儲存預設設定，需要時還原。",
+    "setupHint": "分別安裝普通 VB-CABLE 與 Hi-Fi Cable，HIFI 兩端設為 48 kHz。MicYou 電腦聲音來源固定選擇 Hi-Fi Cable Input，錄音應用選普通 CABLE Output。Windows 預設播放先選平常使用的揚聲器，應用輸出跟隨預設；手機開啟播放後自動切換，關閉或斷線後還原。",
     "aec": {
       "preparing": "回音消除已啟用，正在準備新參考。",
       "monitor_conflict": "耳返開啟，回音消除暫停。",
@@ -23,6 +23,17 @@
     }
   },
   "downlink": {
+    "errorDetails": "輸出還原錯誤詳情",
+    "retryRestore": "重試還原電腦輸出",
+    "routes": {
+      "idle": "手機開關會自動切換電腦輸出，關閉後還原。",
+      "acquiring": "正在切換電腦輸出…",
+      "held": "電腦輸出已轉到手機，關閉播放後還原。",
+      "restored": "電腦輸出已還原。",
+      "restore_failed": "電腦輸出尚未還原，請處理後重試。",
+      "released_external": "電腦輸出已被手動變更，已停止自動切換。",
+      "unsupported_peer": "此手機版本不支援自動切換，請更新手機端。"
+    },
     "title": "電腦聲音 → 手機",
     "description": "在手機開啟電腦聲音接收。此來源與手機咪高峰輸出裝置分別設定。",
     "refresh": "重新整理來源",
@@ -41,6 +52,17 @@
       "idle": "在手機開啟播放，即可接收電腦聲音"
     },
     "errors": {
+      "route_source_required": "自動切換需要固定的獨立虛擬輸出，請選擇 Hi-Fi Cable Input。",
+      "route_restore_required": "上次電腦輸出尚未還原，請先重試還原。",
+      "route_acquire_failed": "無法切換電腦輸出。請核對播放裝置並在手機重試。",
+      "route_changed_external": "電腦輸出已被手動變更。需要轉回手機時，請在手機重試。",
+      "route_busy": "另一份 MicYou 正在控制電腦輸出，請先結束其播放。",
+      "route_restore_target_required": "Windows 目前已使用此虛擬輸出。請先選擇平常使用的揚聲器，再在手機開啟播放。",
+      "route_unavailable": "自動切換電腦輸出暫不可用，請核對裝置後重試。",
+      "playback_failed": "手機播放失敗。請查看手機提示並重試。",
+      "builtin_microphone_required": "手機內置麥克風不可用，請查看手機提示。",
+      "unsupported_android": "此 Android 版本不支援電腦聲音播放。",
+      "route_restore_failed": "電腦輸出還原失敗。請重試還原，或在 Windows 聲音設定中選擇可用輸出後再試。",
       "unsupported_platform": "電腦聲音僅支援 Windows。",
       "unsupported_peer": "已連接的手機不支援電腦聲音。",
       "source_unavailable": "所選播放裝置無法使用，請選擇其他來源。",

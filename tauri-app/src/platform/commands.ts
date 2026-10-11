@@ -53,6 +53,7 @@ export interface Commands {
   set_output_endpoint: { args: { endpointId: string }; result: AudioRoutingStatus };
   list_downlink_sources: { args: NoArgs; result: DownlinkSource[] };
   get_downlink_status: { args: NoArgs; result: DownlinkStatus };
+  retry_playback_route_restore: { args: NoArgs; result: DownlinkStatus };
   set_downlink_source: { args: { sourceId: string | null }; result: DownlinkStatus };
   get_audio_settings: { args: NoArgs; result: Partial<AudioDspSettings> };
   update_audio_settings: { args: { settings: AudioDspSettings }; result: string };

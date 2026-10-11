@@ -35,6 +35,8 @@ internal class DownlinkSession(
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val lock = Mutex()
     private val policy = DownlinkPolicy(sessionId)
+    private val modeObserver = PlaybackModeObserver(context, scope)
+    private var modePaused = false
     private val closed = AtomicBoolean(false)
     private var status = DesktopAudioStatus(phase = DesktopAudioPhase.Checking)
     private var player: DesktopAudioPlayer? = null
@@ -67,17 +69,24 @@ internal class DownlinkSession(
         scope.launch {
             lock.withLock {
                 if (closed.get()) return@withLock
-                if (!enabled) { disableLocked(""); return@withLock }
+                if (!enabled) { stopLocked("", clearIntent = true); return@withLock }
                 if (policy.enabled) return@withLock
                 if (!status.supported || unsupportedTimedOut) {
                     update(status.copy(phase = DesktopAudioPhase.Unsupported, error = "unsupported_peer")); return@withLock
                 }
+                policy.setDesired(true)
                 val request = policy.request(true)
-                update(status.copy(enabled = true, phase = DesktopAudioPhase.Connecting, error = ""))
+                update(status.copy(enabled = true, phase = DesktopAudioPhase.Connecting, error = "",
+                    routeState = "", routeError = ""))
                 preparing = scope.launch {
                     try {
+                        lock.withLock {
+                            if (!policy.isCurrentRequest(request) || closed.get()) return@launch
+                            modePaused = modeObserver.isPaused()
+                            modeObserver.start(changed = { modeChanged(request) }, failed = { fail("playback_failed", request) })
+                        }
                         prepareInput(request)
-                        val local = DesktopAudioPlayer(context, scope, { reason -> fail(reason, request) }) { queued, droppedFrames, underruns ->
+                        val local = DesktopAudioPlayer(scope, { reason -> fail(reason, request) }) { queued, droppedFrames, underruns ->
                             scope.launch {
                                 lock.withLock {
                                     if (policy.enabled && request == policy.requestId && !closed.get()) update(status.copy(
@@ -90,6 +99,7 @@ internal class DownlinkSession(
                                 local.stop(); return@launch
                             }
                             player = local
+                            local.setPaused(modePaused)
                         }
                         local.prepare()
                         lock.withLock {
@@ -104,7 +114,8 @@ internal class DownlinkSession(
                         Logger.w("DesktopAudioPlayer", "Downlink preparation failed: ${e.message}")
                         scope.launch {
                             lock.withLock {
-                                if (request == policy.requestId && !closed.get()) disableLocked(e.message ?: "playback_failed")
+                                if (policy.isCurrentRequest(request) && !closed.get())
+                                    stopLocked(playbackErrorCode(e.message), clearIntent = false)
                             }
                         }
                     }
@@ -113,27 +124,53 @@ internal class DownlinkSession(
         }
     }
 
+    private fun modeChanged(request: Long) {
+        scope.launch { lock.withLock {
+            if (!closed.get() && policy.isCurrentRequest(request)) {
+                try {
+                    // 回调排队后重新读取当前模式，避免旧NORMAL事件恢复新一轮通信中断。
+                    modePaused = modeObserver.isPaused()
+                    player?.setPaused(modePaused)
+                    if (active) update(status.copy(phase = if (modePaused) DesktopAudioPhase.Paused else DesktopAudioPhase.Playing,
+                        queuedMs = if (modePaused) 0 else status.queuedMs))
+                } catch (_: Exception) { stopLocked("playback_failed", clearIntent = false) }
+            }
+        } }
+    }
+
     fun state(message: DownlinkStateMessage) {
         scope.launch {
             lock.withLock {
                 if (closed.get() || unsupportedTimedOut) return@withLock
                 val previousStream = policy.streamId
                 if (!policy.accepts(message)) return@withLock
+                update(status.copy(supportsPlaybackRouting = message.supportsPlaybackRouting,
+                    routeState = message.routeState, routeError = message.routeError))
                 if (!message.supported) {
-                    if (policy.enabled) disableLocked(message.error.ifEmpty { "unsupported_peer" })
-                    update(status.copy(supported = false, enabled = false, phase = DesktopAudioPhase.Unsupported,
+                    if (policy.enabled) stopLocked("unsupported_peer", clearIntent = false)
+                    update(status.copy(supported = false, enabled = policy.desiredEnabled, phase = DesktopAudioPhase.Unsupported,
                         error = message.error.ifEmpty { "unsupported_peer" }))
                     return@withLock
                 }
                 update(status.copy(supported = true))
                 if (!policy.enabled) {
-                    update(status.copy(phase = DesktopAudioPhase.Ready, error = "")); return@withLock
+                    // 故障停止的确认只更新电脑恢复结果，不能抹掉本地意图与故障。
+                    if (!policy.desiredEnabled) update(status.copy(phase = DesktopAudioPhase.Ready, error = ""))
+                    return@withLock
                 }
-                if (message.error.isNotEmpty()) { disableLocked(message.error); return@withLock }
-                if (message.active && !policy.validFormat(message)) { disableLocked("invalid_frame"); return@withLock }
-                if (policy.streamId != previousStream || !message.active) player?.resetStream()
+                val error = when (message.routeState) {
+                    "released_external" -> "output_changed_external"
+                    "restore_failed" -> "route_restore_failed"
+                    else -> message.error.ifEmpty { if (message.routeError.isNotEmpty()) "route_switch_failed" else "" }
+                }
+                if (error.isNotEmpty()) { stopLocked(error, clearIntent = false); return@withLock }
+                if (message.active && !policy.validFormat(message)) { stopLocked("invalid_frame", clearIntent = false); return@withLock }
+                try {
+                    if (policy.streamId != previousStream || !message.active) player?.resetStream()
+                } catch (_: Exception) { stopLocked("playback_failed", clearIntent = false); return@withLock }
                 active = message.active
-                update(status.copy(phase = if (active) DesktopAudioPhase.Playing else DesktopAudioPhase.Connecting))
+                update(status.copy(phase = if (!active) DesktopAudioPhase.Connecting
+                    else if (modePaused) DesktopAudioPhase.Paused else DesktopAudioPhase.Playing))
             }
         }
     }
@@ -146,7 +183,7 @@ internal class DownlinkSession(
             when (policy.frame(message)) {
                 FrameDecision.Invalid -> fail("invalid_frame", policy.requestId)
                 FrameDecision.Drop -> dropped.incrementAndGet()
-                FrameDecision.Accept -> if (active) player?.offer(message.pcm) else dropped.incrementAndGet()
+                FrameDecision.Accept -> if (active && !modePaused) player?.offer(message.pcm) else dropped.incrementAndGet()
             }
         } finally { lock.unlock() }
     }
@@ -184,19 +221,23 @@ internal class DownlinkSession(
 
     private fun fail(reason: String, request: Long) {
         scope.launch { lock.withLock {
-            if (!closed.get() && policy.isCurrentRequest(request)) disableLocked(reason)
+            if (!closed.get() && policy.isCurrentRequest(request)) stopLocked(playbackErrorCode(reason), clearIntent = false)
         } }
     }
 
-    private suspend fun disableLocked(reason: String) {
+    private suspend fun stopLocked(reason: String, clearIntent: Boolean) {
         preparing?.cancel(); preparing = null
+        modeObserver.stop(); modePaused = false
         player?.stop(); player = null; active = false
         restoreInput()
         val wasEnabled = policy.enabled
+        if (clearIntent) policy.setDesired(false)
         val request = policy.request(false)
-        update(status.copy(enabled = false, phase = if (reason.isEmpty()) DesktopAudioPhase.Ready else DesktopAudioPhase.Error,
+        update(status.copy(enabled = policy.desiredEnabled, phase = if (reason.isEmpty()) DesktopAudioPhase.Ready else DesktopAudioPhase.Error,
             error = reason, queuedMs = 0))
-        if (status.supported && wasEnabled) send(DownlinkRequestMessage(policy.sessionId, request, false))
+        if (status.supported && (wasEnabled || clearIntent))
+            send(DownlinkRequestMessage(policy.sessionId, request, false,
+                playbackError = if (clearIntent) "" else playbackErrorCode(reason)))
     }
 
     private fun restoreInput() {
@@ -218,6 +259,8 @@ internal class DownlinkSession(
     suspend fun close() {
         if (!closed.compareAndSet(false, true)) return
         lock.withLock {
+            modeObserver.stop()
+            policy.setDesired(false)
             preparing?.cancel(); player?.stop(); player = null
             restoreInput()
         }

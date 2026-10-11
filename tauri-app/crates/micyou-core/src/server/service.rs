@@ -306,6 +306,7 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
     // The lifecycle phase is the single source of truth for "running": a
     // token only exists between a successful begin_start and the next stop.
     state.lifecycle.lock().await.begin_start().await?;
+    state.downlink.recover_route().await;
     let bind_addr = bind_address.unwrap_or_else(|| "0.0.0.0".to_string());
     let cancel_token = CancellationToken::new();
     *state.cancel_token.lock().await = Some(cancel_token.clone());

@@ -10,6 +10,9 @@ internal const val DOWNLINK_PREBUFFER_FRAMES = 3
 data class DesktopAudioStatus(
     val supported: Boolean = false,
     val enabled: Boolean = false,
+    val supportsPlaybackRouting: Boolean = false,
+    val routeState: String = "",
+    val routeError: String = "",
     val phase: DesktopAudioPhase = DesktopAudioPhase.Disconnected,
     val error: String = "",
     val queuedMs: Int = 0,
@@ -17,13 +20,15 @@ data class DesktopAudioStatus(
     val underruns: Long = 0
 )
 
-enum class DesktopAudioPhase { Disconnected, Checking, Unsupported, Ready, Connecting, Playing, Error }
+enum class DesktopAudioPhase { Disconnected, Checking, Unsupported, Ready, Connecting, Playing, Paused, Error }
 
 /** 只在会话控制锁下访问；请求与流代际分别拒绝迟到消息。 */
 internal class DownlinkPolicy(val sessionId: Long) {
     var requestId: Long = 0
         private set
     var enabled: Boolean = false
+        private set
+    var desiredEnabled: Boolean = false
         private set
     var streamId: Long = 0
         private set
@@ -35,6 +40,8 @@ internal class DownlinkPolicy(val sessionId: Long) {
         sequence = -1
         return requestId
     }
+
+    fun setDesired(enabled: Boolean) { desiredEnabled = enabled }
 
     fun accepts(state: DownlinkStateMessage): Boolean {
         if (state.sessionId != sessionId || state.requestId != requestId || state.streamId < streamId) return false
@@ -61,6 +68,12 @@ internal class DownlinkPolicy(val sessionId: Long) {
 }
 
 internal enum class FrameDecision { Accept, Drop, Invalid }
+
+/** 线上的本地故障只传固定码，不泄漏平台异常文本。 */
+internal fun playbackErrorCode(reason: String?): String = when (reason) {
+    "invalid_frame", "builtin_microphone_required", "unsupported_android", "unsupported_peer" -> reason
+    else -> "playback_failed"
+}
 
 /** 包括路由预热静音；AudioTrack 的播放头也会消费这些采样。调用方持 native 锁。 */
 internal class PlaybackQueueCounter {

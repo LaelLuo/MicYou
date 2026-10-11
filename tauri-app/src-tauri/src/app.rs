@@ -20,7 +20,10 @@ use crate::tray::{self, TrayContext};
 use crate::window;
 use micyou_core::mode_lock::{self, RunMode};
 use micyou_core::server::{service, ServerState};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::Manager;
 
 // 在任何工作執行緒與共享設定讀取之前固定便攜版目錄。
@@ -80,6 +83,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     );
     state.plugins.load_saved_plugins();
     app.manage(state);
+    let recovery = handle.state::<ServerState>().downlink.clone();
+    tauri::async_runtime::spawn(async move { recovery.recover_route().await });
 
     match mode_lock::acquire(RunMode::Gui) {
         Ok(()) => log::info!(target: "mode", "GUI mode lock acquired"),
@@ -148,6 +153,7 @@ pub fn run() {
             commands::audio::get_audio_routing_status,
             commands::audio::set_output_endpoint,
             commands::audio::get_downlink_status,
+            commands::audio::retry_playback_route_restore,
             commands::audio::set_downlink_source,
             commands::audio::update_audio_settings,
             commands::audio::get_audio_settings,
@@ -207,10 +213,32 @@ pub fn run() {
         ])
         .build(context)
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(state) = app.try_state::<ServerState>() {
-                    service::close_output_device(&state);
+        .run({
+            let exiting = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
+            move |app, event| {
+                if let tauri::RunEvent::ExitRequested { ref api, code, .. } = event {
+                    if !finished.load(Ordering::Acquire) {
+                        api.prevent_exit();
+                        if !exiting.swap(true, Ordering::AcqRel) {
+                            let handle = app.clone();
+                            let finished = finished.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(state) = handle.try_state::<ServerState>() {
+                                    if let Err(error) = service::stop_server(&state).await {
+                                        log::warn!("[Exit] Server cleanup: {error}");
+                                    }
+                                }
+                                finished.store(true, Ordering::Release);
+                                handle.exit(code.unwrap_or(0));
+                            });
+                        }
+                    }
+                }
+                if let tauri::RunEvent::Exit = event {
+                    if let Some(state) = app.try_state::<ServerState>() {
+                        service::close_output_device(&state);
+                    }
                 }
             }
         });

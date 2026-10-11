@@ -22,5 +22,6 @@ pub mod firewall;
 #[cfg(target_os = "linux")]
 pub mod pipewire;
 pub mod resources;
+pub mod playback_route;
 pub mod terminal;
 pub mod vbcable;
