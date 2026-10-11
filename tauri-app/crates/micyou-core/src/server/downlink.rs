@@ -52,6 +52,7 @@ struct Inner {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 pub struct DownlinkController {
+    identity: fn(&str) -> Result<micyou_audio::endpoint::OutputEndpoint, String>,
     inner: Mutex<Inner>,
     operation: tokio::sync::Mutex<()>,
     events: SharedEvents,
@@ -60,6 +61,7 @@ pub struct DownlinkController {
 impl DownlinkController {
     pub fn new(events: SharedEvents, output: Vec<Arc<RwLock<Option<String>>>>) -> Arc<Self> {
         Arc::new(Self {
+            identity: micyou_audio::endpoint::resolve_endpoint_identity,
             inner: Mutex::new(Inner {
                 capture_source: None,
                 status: DownlinkStatus {
@@ -101,9 +103,43 @@ impl DownlinkController {
         })
     }
     fn is_feedback(&self, id: &str) -> bool {
-        self.output
-            .iter()
-            .any(|output| output.read().unwrap_or_else(|p| p.into_inner()).as_deref() == Some(id))
+        self.source_error(id) == Some("feedback_source")
+    }
+    fn source_error(&self, id: &str) -> Option<&'static str> {
+        use micyou_audio::endpoint::{same_line, Component};
+        let source = (self.identity)(id).ok();
+        if source
+            .as_ref()
+            .is_none_or(|e| e.component == Component::UnknownVirtual)
+        {
+            return Some("identity_unavailable");
+        }
+        for output in &self.output {
+            let actual = output.read().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(actual) = actual {
+                if actual.eq_ignore_ascii_case(id) {
+                    return Some("feedback_source");
+                }
+                let primary = (self.identity)(&actual).ok();
+                if source
+                    .as_ref()
+                    .is_some_and(|e| e.component != Component::Physical)
+                    && primary
+                        .as_ref()
+                        .is_none_or(|e| e.component == Component::UnknownVirtual)
+                {
+                    return Some("identity_unavailable");
+                }
+                if source
+                    .as_ref()
+                    .zip(primary.as_ref())
+                    .is_some_and(|(source, primary)| same_line(source, primary))
+                {
+                    return Some("feedback_source");
+                }
+            }
+        }
+        None
     }
     fn publish(&self, inner: &Inner) {
         self.events.downlink_status_changed(inner.status.clone());
@@ -274,8 +310,8 @@ impl DownlinkController {
             .iter()
             .find(|s| source.as_ref().map_or(s.is_default, |id| id == &s.id))
             .ok_or("source_unavailable")?;
-        if selected.is_feedback {
-            return Err("feedback_source".into());
+        if let Some(error) = self.source_error(&selected.id) {
+            return Err(error.into());
         }
         self.replace_source(source, |source| {
             crate::config::update_server_prefs(|prefs| prefs.downlink_source_id = source.clone())
@@ -397,7 +433,7 @@ impl DownlinkController {
             && inner
                 .capture_source
                 .as_ref()
-                .is_some_and(|id| !self.is_feedback(id))
+                .is_some_and(|id| self.source_error(id).is_none())
     }
     #[allow(clippy::too_many_arguments)]
     fn capture_worker(
@@ -425,14 +461,12 @@ impl DownlinkController {
                     if stop.load(Ordering::Acquire) || cancel.is_cancelled() {
                         return Err("cancelled".into());
                     }
-                    if self.is_feedback(&endpoint.id) {
-                        return Err("feedback_source".into());
+                    if let Some(error) = self.source_error(&endpoint.id) {
+                        return Err(error.into());
                     }
                     if source.is_none() {
-                        let default = stereo_loopback::list_render_endpoints()?
-                            .into_iter()
-                            .find(|s| s.is_default);
-                        if default.as_ref().map(|s| &s.id) != Some(&endpoint.id) {
+                        let default = micyou_audio::endpoint::default_render_endpoint_id()?;
+                        if !default.eq_ignore_ascii_case(&endpoint.id) {
                             return Err("source_unavailable".into());
                         }
                     }
@@ -487,7 +521,10 @@ impl DownlinkController {
             inner.status.active = false;
             inner.status.error = result.err().filter(|e| e != "cancelled").map(|error| {
                 log::warn!("[Downlink] capture ended: {error}");
-                if error == "feedback_source" || error == "source_unavailable" {
+                if error == "feedback_source"
+                    || error == "source_unavailable"
+                    || error == "identity_unavailable"
+                {
                     error
                 } else {
                     "capture_failed".into()

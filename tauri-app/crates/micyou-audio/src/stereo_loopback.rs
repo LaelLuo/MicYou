@@ -13,10 +13,10 @@ pub struct RenderEndpoint {
 }
 
 #[cfg(windows)]
-struct Apartment;
+pub(crate) struct Apartment;
 #[cfg(windows)]
 impl Apartment {
-    fn enter() -> Result<Self, windows::core::Error> {
+    pub(crate) fn enter() -> Result<Self, windows::core::Error> {
         wasapi::initialize_mta().ok()?;
         Ok(Self)
     }
@@ -59,20 +59,27 @@ pub fn float_to_pcm(sample: f32) -> [u8; 2] {
     ((finite * 32768.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes()
 }
 
-// 非静音指针必须来自尚未 ReleaseBuffer 的 WASAPI 包，并覆盖 frames*8 字节。
+// 非静音指针必须来自尚未 ReleaseBuffer 的 WASAPI 包，覆盖 frames*block_align 字节。
 #[cfg(any(windows, test))]
-unsafe fn copy_capture_packet(
+pub(crate) unsafe fn copy_capture_packet(
     ptr: *const u8,
     frames: usize,
     max_frames: usize,
+    block_align: usize,
     silent: bool,
 ) -> Result<Vec<u8>, &'static str> {
     if frames > max_frames {
         return Err("capture buffer exceeds device limit");
     }
+    if block_align == 0 {
+        return Err("capture block alignment is zero");
+    }
     let bytes = frames
-        .checked_mul(8)
+        .checked_mul(block_align)
         .ok_or("capture buffer exceeds device limit")?;
+    if bytes > isize::MAX as usize {
+        return Err("capture buffer exceeds slice limit");
+    }
     if silent {
         return Ok(vec![0; bytes]);
     }
@@ -147,6 +154,7 @@ pub fn capture(
                             ptr,
                             frames as usize,
                             max_frames,
+                            8,
                             flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0,
                         )
                     };
@@ -202,18 +210,25 @@ mod tests {
     fn capture_packets_handle_silence_null_and_device_bounds() {
         let ptr = std::ptr::null();
         assert_eq!(
-            unsafe { copy_capture_packet(ptr, 2, 2, true) }.unwrap(),
+            unsafe { copy_capture_packet(ptr, 2, 2, 8, true) }.unwrap(),
             vec![0; 16]
         );
-        assert!(unsafe { copy_capture_packet(ptr, 2, 2, false) }.is_err());
-        assert!(unsafe { copy_capture_packet(ptr, 3, 2, true) }.is_err());
+        assert!(unsafe { copy_capture_packet(ptr, 2, 2, 8, false) }.is_err());
+        assert!(unsafe { copy_capture_packet(ptr, 3, 2, 8, true) }.is_err());
+        assert!(unsafe { copy_capture_packet(ptr, 1, 2, 0, true) }.is_err());
         assert_eq!(
-            unsafe { copy_capture_packet(ptr, 0, 2, false) }.unwrap(),
+            unsafe { copy_capture_packet(ptr, 2, 2, 64, true) }
+                .unwrap()
+                .len(),
+            128
+        );
+        assert_eq!(
+            unsafe { copy_capture_packet(ptr, 0, 2, 8, false) }.unwrap(),
             vec![]
         );
         let samples = [0u8, 0, 128, 63, 0, 0, 128, 191];
         assert_eq!(
-            unsafe { copy_capture_packet(samples.as_ptr(), 1, 2, false) }.unwrap(),
+            unsafe { copy_capture_packet(samples.as_ptr(), 1, 2, 8, false) }.unwrap(),
             samples
         );
     }

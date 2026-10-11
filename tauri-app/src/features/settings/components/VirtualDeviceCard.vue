@@ -1,21 +1,24 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { Check, Copy, Download, Loader2 } from '@lucide/vue';
+import { Check, Copy, Download, RefreshCw } from '@lucide/vue';
 import { isLinux, isMacOS } from '@/shared/lib/os';
 import { supportedDistros, useOutputDevices } from '../composables/useOutputDevices';
+import { useAudioRouting } from '../composables/useAudioRouting';
+import { openUrl } from '@/platform';
+const { hasCable, hasHifi, routingBusy, routingError, refreshRouting } = useAudioRouting();
+async function openHifiDownload() {
+  try { await openUrl('https://vb-audio.com/Cable/index.htm#DownloadASIOBridge'); }
+  catch (e) { console.error('Failed to open Hi-Fi Cable download:', e); }
+}
 
 // The platform's virtual microphone: BlackHole on macOS, PipeWire on Linux,
 // VB-CABLE on Windows.
 const {
-  hasVBCable,
   hasBlackHole,
   blackholeStatus,
   pipewireStatus,
   selectedDistro,
   currentPipewireInstallCommand,
-  vbcableInstalling,
-  vbcableInstallProgress,
-  installVBCable,
   openVBCableDownload,
   openBlackHoleDownload,
 } = useOutputDevices();
@@ -127,28 +130,29 @@ async function copyPipewireCommand() {
 
   <div v-else class="bg-surface-bright rounded-2xl p-4 space-y-4 shadow-xs">
     <div class="flex items-center justify-between">
-      <h4 class="font-bold text-on-surface text-lg">{{ $t('settings.vbcable.title') }}</h4>
+      <h4 class="font-bold text-on-surface text-lg">{{ $t('routing.components') }}</h4>
       <span
         class="text-xs font-medium px-2 py-1 rounded-md"
-        :class="hasVBCable ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'"
+        :class="hasCable && hasHifi ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'"
       >
-        {{ hasVBCable ? $t('settings.vbcable.installed') : $t('settings.vbcable.notDetected') }}
+        {{ $t(hasCable && hasHifi ? 'routing.detected' : 'routing.incomplete') }}
       </span>
     </div>
-    <p class="text-xs text-on-surface-variant">{{ $t('settings.vbcable.desc') }}</p>
-    <div v-if="!hasVBCable" class="space-y-2">
+    <p class="text-xs text-on-surface-variant">{{ $t('routing.componentHint') }}</p>
+    <p class="text-xs">{{ $t('routing.microphone') }} · VB-CABLE: {{ $t(hasCable ? 'routing.detected' : 'routing.notDetected') }}</p>
+    <p class="text-xs">{{ $t('downlink.title') }} · Hi-Fi Cable: {{ $t(hasHifi ? 'routing.detected' : 'routing.notDetected') }}</p>
+    <p v-if="routingError" class="text-xs text-error" role="alert">{{ $t('routing.detectFailed') }}</p>
+    <div class="space-y-2">
       <button
-        @click="installVBCable"
-        :disabled="vbcableInstalling"
+        @click="refreshRouting"
+        :disabled="routingBusy"
         class="w-full py-2 bg-primary disabled:opacity-50 rounded-xl text-sm font-bold text-on-primary flex items-center justify-center gap-2 transition-colors"
       >
-        <Loader2 v-if="vbcableInstalling" class="w-4 h-4 animate-spin" />
-        <Download v-else class="w-4 h-4" />
-        {{
-          vbcableInstalling
-            ? vbcableInstallProgress || $t('vbcableInstall.installing')
-            : $t('vbcableDetect.autoInstall')
-        }}
+        <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': routingBusy }" />
+        {{ $t('downlink.refresh') }}
+      </button>
+      <button @click="openHifiDownload" class="w-full py-2 bg-surface-variant hover:bg-surface-variant/80 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors">
+        <Download class="w-4 h-4" /> {{ $t('routing.downloadHifi') }}
       </button>
       <button
         @click="openVBCableDownload"

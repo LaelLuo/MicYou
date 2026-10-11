@@ -23,10 +23,55 @@ impl ServerEvents for Events {
     fn plugin_download_progress(&self, _: DownloadProgress) {}
 }
 fn controller() -> Arc<DownlinkController> {
-    DownlinkController::new(
+    let mut controller = DownlinkController::new(
         Arc::new(Events::default()),
         vec![Arc::new(RwLock::new(None))],
-    )
+    );
+    Arc::get_mut(&mut controller).unwrap().identity = |id| {
+        Ok(micyou_audio::endpoint::OutputEndpoint {
+            id: id.into(),
+            name: id.into(),
+            component: micyou_audio::endpoint::Component::Physical,
+            backing_id: None,
+        })
+    };
+    controller
+}
+
+#[test]
+fn virtual_line_admission_and_physical_endpoint_policy_share_one_check() {
+    use micyou_audio::endpoint::{Component, OutputEndpoint};
+    let mut controller = controller();
+    Arc::get_mut(&mut controller).unwrap().identity = |id| {
+        let (component, backing) = match id {
+            "cable2" | "cable16" => (Component::Cable, Some("ordinary")),
+            "hifi" => (Component::Hifi, Some("hifi")),
+            "unknown" => (Component::UnknownVirtual, Some("unverified")),
+            _ => (Component::Physical, Some("physical-card")),
+        };
+        Ok(OutputEndpoint {
+            id: id.into(),
+            name: id.into(),
+            component,
+            backing_id: backing.map(str::to_string),
+        })
+    };
+    *controller.output[0].write().unwrap() = Some("cable2".into());
+    assert_eq!(controller.source_error("cable16"), Some("feedback_source"));
+    assert_eq!(controller.source_error("hifi"), None);
+    assert_eq!(
+        controller.source_error("unknown"),
+        Some("identity_unavailable")
+    );
+    *controller.output[0].write().unwrap() = Some("unknown".into());
+    assert_eq!(
+        controller.source_error("hifi"),
+        Some("identity_unavailable")
+    );
+    assert_eq!(controller.source_error("speakerA"), None);
+    *controller.output[0].write().unwrap() = Some("speakerA".into());
+    assert_eq!(controller.source_error("speakerB"), None);
+    assert_eq!(controller.source_error("speakerA"), Some("feedback_source"));
 }
 pub(crate) fn unavailable_controller(events: SharedEvents) -> Arc<DownlinkController> {
     let controller = DownlinkController::new(events, vec![Arc::new(RwLock::new(None))]);

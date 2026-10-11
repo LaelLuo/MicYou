@@ -33,6 +33,9 @@ impl TauriEventSink {
 }
 
 impl ServerEvents for TauriEventSink {
+    fn audio_routing_status_changed(&self, status: micyou_core::audio_routing::AudioRoutingStatus) {
+        let _ = self.0.emit("audio-routing-status-changed", status);
+    }
     fn downlink_status_changed(&self, status: DownlinkStatus) {
         self.emit("downlink-status-changed", status);
     }

@@ -20,6 +20,9 @@ import { useOutputDevices } from '../../composables/useOutputDevices';
 import { useRestoreDefaults } from '../../composables/useRestoreDefaults';
 import SettingRow from '../SettingRow.vue';
 import VirtualDeviceCard from '../VirtualDeviceCard.vue';
+import { isWindows } from '@/shared/lib/os';
+import { useAudioRouting } from '../../composables/useAudioRouting';
+import type { AcceptableValue } from 'reka-ui';
 
 const { t } = useI18n();
 const { currentLanguage } = useLanguageSetting();
@@ -42,6 +45,11 @@ const {
   fetchDevices,
 } = useOutputDevices();
 const restore = useRestoreDefaults();
+const { endpoints, routingStatus, routingError, routingBusy, selectOutput } = useAudioRouting();
+const missingOutput = computed(() => routingStatus.value?.outputEndpointId && !endpoints.value.some((device) => device.id === routingStatus.value?.outputEndpointId));
+function updateOutput(value: AcceptableValue) {
+  if (typeof value === 'string') void selectOutput(value);
+}
 
 const languages = [
   ['zh', '简体中文'],
@@ -189,10 +197,19 @@ onMounted(() => {
     <!-- Output Device -->
     <div class="bg-surface-bright rounded-2xl p-4 space-y-4 shadow-xs">
       <div>
-        <h4 class="font-bold text-on-surface">{{ $t('settings.audioOutput.title') }}</h4>
-        <p class="text-xs text-on-surface-variant">{{ $t('settings.audioOutput.desc') }}</p>
+        <h4 class="font-bold text-on-surface">{{ $t(isWindows ? 'routing.microphone' : 'settings.audioOutput.title') }}</h4>
+        <p class="text-xs text-on-surface-variant">{{ $t(isWindows ? 'routing.microphoneHint' : 'settings.audioOutput.desc') }}</p>
       </div>
-      <Select v-model="settings.audioDevice">
+      <Select v-if="isWindows" :model-value="routingStatus?.outputEndpointId ?? undefined" :disabled="routingBusy" @update:model-value="updateOutput">
+        <SelectTrigger class="w-full bg-surface-container border-none shadow-none rounded-xl h-12 px-4 font-medium text-sm">
+          <SelectValue :placeholder="$t('routing.chooseOutput')" />
+        </SelectTrigger>
+        <SelectContent class="border-surface-variant/20 rounded-xl bg-surface shadow-lg max-h-[40vh]">
+          <SelectItem v-if="missingOutput && routingStatus?.outputEndpointId" :value="routingStatus.outputEndpointId" disabled>{{ $t('routing.missingOutput') }}</SelectItem>
+          <SelectItem v-for="device in endpoints" :key="device.id" :value="device.id">{{ device.name }}</SelectItem>
+        </SelectContent>
+      </Select>
+      <Select v-else v-model="settings.audioDevice">
         <SelectTrigger class="w-full bg-surface-container border-none shadow-none rounded-xl h-12 px-4 font-medium text-sm">
           <SelectValue :placeholder="$t('settings.audioOutput.auto')" />
         </SelectTrigger>
@@ -204,12 +221,13 @@ onMounted(() => {
         </SelectContent>
       </Select>
 
-      <div v-if="isVirtualDeviceSelected" class="flex items-center gap-1.5 text-xs text-green-400 font-medium">
+      <p v-if="isWindows && (routingError || routingStatus?.error)" class="text-xs text-error" role="alert">{{ $t('routing.outputFailed') }}</p>
+      <div v-if="!isWindows && isVirtualDeviceSelected" class="flex items-center gap-1.5 text-xs text-green-400 font-medium">
         <CheckCircle2 class="w-3.5 h-3.5 shrink-0" />
         <span>{{ $t('settings.audioOutput.routingActive') }}</span>
       </div>
       <div
-        v-else-if="isExplicitPhysicalDevice || isAutoFallbackToPhysical"
+        v-else-if="!isWindows && (isExplicitPhysicalDevice || isAutoFallbackToPhysical)"
         class="rounded-xl bg-amber-500/10 border border-amber-500/20 p-3 space-y-1 text-xs text-amber-400"
       >
         <div class="flex items-center gap-1.5 font-bold">

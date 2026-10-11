@@ -29,75 +29,11 @@ pub struct VBCableResult {
 /// Check if VB-CABLE is installed by scanning audio devices, registry, or driver files
 #[cfg(target_os = "windows")]
 pub fn is_installed() -> bool {
-    use cpal::traits::{DeviceTrait, HostTrait};
-
-    let is_vbcable_device = |name: &str| -> bool {
-        let lower = name.to_lowercase();
-        lower.contains("cable input")
-            || lower.contains("cable output")
-            || lower.contains("vb-audio")
-            || (lower.contains("cable") && (lower.contains("virtual") || lower.contains("audio")))
-    };
-
-    // 1. Device check: check CPAL output and input devices
-    let host = cpal::default_host();
-    if let Ok(devices) = host.output_devices() {
-        for dev in devices {
-            if let Some(name) = micyou_audio::device_name(&dev) {
-                if is_vbcable_device(&name) {
-                    return true;
-                }
-            }
-        }
-    }
-    if let Ok(devices) = host.input_devices() {
-        for dev in devices {
-            if let Some(name) = micyou_audio::device_name(&dev) {
-                if is_vbcable_device(&name) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // 2. Registry verification: check services and software keys (64-bit and 32-bit views)
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
-    use winreg::RegKey;
-
-    let registry_paths = [
-        // Windows Services (service names created by official driver)
-        "SYSTEM\\CurrentControlSet\\Services\\VBCABLE",
-        "SYSTEM\\CurrentControlSet\\Services\\VBCABLEA",
-        "SYSTEM\\CurrentControlSet\\Services\\VBCABLEB",
-        "SYSTEM\\CurrentControlSet\\Services\\VB-Cable",
-        // Software keys
-        "SOFTWARE\\VB-Audio\\Cable",
-        "SOFTWARE\\VB-Audio\\VB-Cable",
-        "SOFTWARE\\WOW6432Node\\VB-Audio\\Cable",
-        "SOFTWARE\\WOW6432Node\\VB-Audio\\VB-Cable",
-    ];
-
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    for path in &registry_paths {
-        if hklm.open_subkey_with_flags(path, KEY_READ).is_ok() {
-            return true;
-        }
-    }
-
-    // 3. File system verification: check driver and utility files
-    let file_paths = [
-        r"C:\Program Files\VB\CABLE\vbcable_control_panel.exe",
-        r"C:\Program Files (x86)\VB\CABLE\vbcable_control_panel.exe",
-        r"C:\Windows\System32\drivers\vbcable.sys",
-        r"C:\Windows\System32\drivers\vbcable_win7_x64.sys",
-    ];
-    for path in &file_paths {
-        if std::path::Path::new(path).exists() {
-            return true;
-        }
-    }
-
-    false
+    micyou_audio::endpoint::list_output_endpoints().is_ok_and(|endpoints| {
+        endpoints
+            .iter()
+            .any(|e| e.component == micyou_audio::endpoint::Component::Cable)
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

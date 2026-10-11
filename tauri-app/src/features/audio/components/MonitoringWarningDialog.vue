@@ -19,7 +19,7 @@
 
         <div class="px-6 pt-2 pb-2 text-center relative z-10">
           <h3 class="text-lg font-extrabold text-on-surface tracking-wide">{{ $t('dialogs.monitoringWarning.title') }}</h3>
-          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">{{ $t('dialogs.monitoringWarning.desc') }}</p>
+          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">{{ $t('routing.monitorHint') }}</p>
         </div>
 
         <div class="px-6 py-4 flex flex-col gap-2 relative z-10">

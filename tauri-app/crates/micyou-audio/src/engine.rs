@@ -353,6 +353,23 @@ impl AudioOutputManager {
                 return;
             }
             let host = cpal::default_host();
+            #[cfg(windows)]
+            let desired = match crate::endpoint::default_render_endpoint_id() {
+                Ok(id) => id,
+                Err(error) => {
+                    log::warn!("[Audio] Monitor identity unavailable: {error}");
+                    return;
+                }
+            };
+            #[cfg(windows)]
+            let device =
+                match host.output_devices().ok().and_then(|mut devices| {
+                    devices.find(|d| d.id().is_ok_and(|id| id.id() == desired))
+                }) {
+                    Some(device) => device,
+                    None => return,
+                };
+            #[cfg(not(windows))]
             let device = match host.default_output_device() {
                 Some(dev) => dev,
                 None => {
@@ -492,10 +509,10 @@ impl AudioOutputManager {
             };
 
             if let Ok(st) = stream {
-                if let Some(tracker) = &self.monitor_endpoint_tracker {
-                    *tracker.write().unwrap_or_else(|p| p.into_inner()) = monitor_id;
-                }
                 if st.play().is_ok() {
+                    if let Some(tracker) = &self.monitor_endpoint_tracker {
+                        *tracker.write().unwrap_or_else(|p| p.into_inner()) = monitor_id;
+                    }
                     self.monitor_stream = Some(st);
                     log::info!("[Audio] Audio monitor stream started successfully");
                 } else if let Some(tracker) = &self.monitor_endpoint_tracker {
@@ -526,6 +543,24 @@ impl AudioOutputManager {
         }
     }
 
+    /// Health polling reopens only the monitor when the default role changes.
+    pub fn refresh_monitor_endpoint(&mut self) {
+        #[cfg(windows)]
+        if self.is_monitoring {
+            let desired = crate::endpoint::default_render_endpoint_id().ok();
+            let actual = self
+                .monitor_endpoint_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.read().unwrap_or_else(|p| p.into_inner()).clone());
+            if desired != actual {
+                self.stop_monitor_loopback();
+                if desired.is_some() {
+                    self.start_monitor_loopback();
+                }
+            }
+        }
+    }
+
     pub fn start(
         &mut self,
         target_device: Option<String>,
@@ -533,6 +568,15 @@ impl AudioOutputManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
+        #[cfg(windows)]
+        let device = {
+            let target = target_device
+                .as_deref()
+                .ok_or("output endpoint identity required")?;
+            host.output_devices()?
+                .find(|dev| dev.id().is_ok_and(|id| id.id() == target))
+        };
+        #[cfg(not(windows))]
         let device = if let Some(target) = target_device.clone() {
             let mut matched_device = None;
             if let Ok(devices) = host.output_devices() {

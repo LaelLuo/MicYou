@@ -41,6 +41,8 @@ use tokio_util::sync::CancellationToken;
 pub use service::{start_server, stop_server, StartRequest};
 
 pub struct ServerState {
+    output_selection_gate: std::sync::Mutex<()>,
+    pub audio_routing: Arc<RwLock<crate::audio_routing::AudioRoutingStatus>>,
     pub downlink: Arc<downlink::DownlinkController>,
     pub events: SharedEvents,
     /// The frontend's own resource directory, if it knows one (see
@@ -75,10 +77,7 @@ impl ServerState {
         let audio_output = AudioOutputHandle::spawn_with_mute_flag(network_stats.mute_flag());
         let downlink = downlink::DownlinkController::new(
             events.clone(),
-            vec![
-                audio_output.actual_endpoint_id.clone(),
-                audio_output.monitor_endpoint_id.clone(),
-            ],
+            vec![audio_output.actual_endpoint_id.clone()],
         );
         let active_connection = Arc::new(Mutex::new(None));
         let active_audio_session = Arc::new(RwLock::new(ActiveAudioSession::Inactive));
@@ -100,6 +99,10 @@ impl ServerState {
         );
 
         let state = Self {
+            output_selection_gate: std::sync::Mutex::new(()),
+            audio_routing: Arc::new(RwLock::new(
+                crate::audio_routing::AudioRoutingStatus::default(),
+            )),
             downlink,
             events,
             resource_hint,
@@ -129,6 +132,75 @@ impl ServerState {
     /// Resolved directory of bundled models and configs.
     pub fn resource_dir(&self) -> Option<PathBuf> {
         crate::platform::resources::find_resource_dir(self.resource_hint.as_deref())
+    }
+
+    pub fn get_audio_routing_status(&self) -> crate::audio_routing::AudioRoutingStatus {
+        let mut status = self
+            .audio_routing
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        status.output_endpoint_id = self
+            .audio_output
+            .actual_endpoint_id
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        status.monitor_endpoint_id = self
+            .audio_output
+            .monitor_endpoint_id
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        status
+    }
+
+    pub fn set_output_endpoint(
+        &self,
+        id: String,
+    ) -> Result<crate::audio_routing::AudioRoutingStatus, String> {
+        let _selection = self
+            .output_selection_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if id.is_empty() {
+            return Err("output_endpoint_unavailable".into());
+        }
+        let endpoints = micyou_audio::endpoint::list_output_endpoints()?;
+        let selected = crate::audio_routing::resolve_endpoint(&endpoints, Some(&id), "")?;
+        let buffer = self.current_dsp_settings().output_buffer_ms as usize;
+        if !self
+            .audio_output
+            .ensure_open(Some(selected.id.clone()), buffer.clamp(100, 1200))
+        {
+            self.audio_routing
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .error = Some("output_open_failed".into());
+            self.events
+                .audio_routing_status_changed(self.get_audio_routing_status());
+            return Err("output_open_failed".into());
+        }
+        if let Err(error) = crate::config::patch_server_prefs(crate::config::ServerPrefsPatch {
+            output_endpoint_id: Some(selected.id.clone()),
+            output_device: Some(selected.name.clone()),
+            ..Default::default()
+        }) {
+            self.audio_routing
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .error = Some("output_persistence_failed".into());
+            self.events
+                .audio_routing_status_changed(self.get_audio_routing_status());
+            return Err(error);
+        }
+        self.audio_routing
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .error = None;
+        let status = self.get_audio_routing_status();
+        self.events.audio_routing_status_changed(status.clone());
+        Ok(status)
     }
 
     pub async fn list_downlink_sources(&self) -> Result<Vec<downlink::DownlinkSource>, String> {

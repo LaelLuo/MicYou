@@ -1,4 +1,27 @@
 {
+  "routing": {
+    "monitorHint": "耳返會把你的麥克風聲音播放到目前輸出；手機外放時可能產生回音。",
+    "identityError": "無法確認麥克風與電腦聲音通道獨立，請核驗元件身分並選擇不同通道。",
+    "microphone": "手機麥克風 → 電腦錄音",
+    "microphoneHint": "選擇普通 VB-CABLE 播放端點；電腦錄音或通話應用選擇對應的 CABLE Output。",
+    "chooseOutput": "選擇麥克風輸出端點",
+    "missingOutput": "儲存的端點無法使用，請重新選擇",
+    "outputFailed": "無法開啟或確認輸出端點，請重新整理後選擇可用端點。",
+    "components": "兩條獨立音訊通道",
+    "detected": "已偵測到裝置",
+    "notDetected": "未偵測到裝置",
+    "incomplete": "元件未齊全",
+    "detectFailed": "無法核驗元件身分，請重新整理重試。",
+    "componentHint": "普通 VB-CABLE 傳送手機麥克風，Hi-Fi Cable 傳送電腦聲音。裝置偵測不代表音訊隔離已驗收。",
+    "downloadHifi": "從 VB-Audio 官網下載 Hi-Fi Cable",
+    "setupHint": "從 VB-Audio 官網分別下載兩份元件包，以管理員權限手動安裝，按提示安排重新啟動。Windows 播放選 Hi-Fi Cable Input，MicYou 下行選同一來源，錄音應用選普通 CABLE Output；HIFI 兩端均設為 48 kHz。安裝前儲存預設設定，需要時還原。",
+    "aec": {
+      "preparing": "回音消除已啟用，正在準備新參考。",
+      "monitor_conflict": "耳返開啟，回音消除暫停。",
+      "identity_unavailable": "回音消除已啟用但暫停：無法確認耳返與參考通道獨立。",
+      "capture_failed": "回音消除已啟用但暫停：參考擷取無法使用。"
+    }
+  },
   "downlink": {
     "title": "電腦聲音 → 手機",
     "description": "在手機開啟電腦聲音接收。此來源與手機麥克風輸出裝置分別設定。",

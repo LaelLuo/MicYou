@@ -395,10 +395,10 @@
     <string name="desktop_audio_disconnected">請先連接電腦</string>
     <string name="desktop_audio_checking">正在檢查電腦支援情況…</string>
     <string name="desktop_audio_unsupported">目前電腦或 Android 版本不支援播放</string>
-    <string name="desktop_audio_ready">已關閉 · 需要藍牙耳機</string>
-    <string name="desktop_audio_connecting">正在準備藍牙播放…</string>
-    <string name="desktop_audio_playing">正在透過藍牙耳機播放</string>
-    <string name="desktop_audio_bluetooth">請連接藍牙耳機，然後重新開啟</string>
+    <string name="desktop_audio_ready">已關閉 · 跟隨系統媒體輸出</string>
+    <string name="desktop_audio_connecting">正在準備播放…</string>
+    <string name="desktop_audio_playing">正在透過系統媒體輸出播放</string>
+    <string name="desktop_audio_output">播放已停止，請檢查系統媒體輸出後重試</string>
     <string name="desktop_audio_microphone">無法確認手機本體咪高峰，已停止播放</string>
     <string name="desktop_audio_focus">音訊被其他應用程式佔用，請稍後重新開啟</string>
     <string name="desktop_audio_feedback">請選擇與咪高峰輸出不同的電腦音源</string>

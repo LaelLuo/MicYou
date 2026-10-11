@@ -66,6 +66,7 @@ impl std::str::FromStr for ConnectionMode {
 
 #[derive(Clone, Debug)]
 pub struct StartRequest {
+    pub persist_output_selection: Option<String>,
     pub port: u16,
     pub mode: ConnectionMode,
     /// `None` binds every interface (dual-stack auto-bind).
@@ -84,9 +85,32 @@ impl StartRequest {
         bind_address: Option<String>,
     ) -> Result<Self, String> {
         let prefs = crate::config::load_server_prefs();
+        let persist_output_selection = output_device.is_none().then(|| prefs.output_device.clone());
         let mode = mode.unwrap_or(&prefs.mode).parse()?;
         let bind_address = bind_address.or_else(|| saved_bind_address(&prefs, mode));
+        #[cfg(windows)]
+        let output_device = {
+            let endpoints = micyou_audio::endpoint::list_output_endpoints()?;
+            let selected = crate::audio_routing::resolve_endpoint(
+                &endpoints,
+                if output_device.is_some() {
+                    None
+                } else {
+                    prefs.output_endpoint_id.as_deref()
+                },
+                output_device.as_deref().unwrap_or(&prefs.output_device),
+            )?;
+            let legacy = output_device.as_deref().unwrap_or(&prefs.output_device);
+            let auto = crate::server::output::normalize_output_device(legacy).is_none();
+            let unbound = output_device.is_some() || prefs.output_endpoint_id.is_none();
+            Some(if auto && unbound {
+                format!("auto-line:{}", selected.id)
+            } else {
+                selected.id.clone()
+            })
+        };
         Ok(Self {
+            persist_output_selection,
             port: port.unwrap_or(prefs.port),
             mode,
             bind_address,
@@ -192,14 +216,72 @@ fn output_buffer_ms(state: &ServerState) -> usize {
 /// Open the persistent output device with the saved preferences. The GUI
 /// calls this at launch so the virtual microphone exists before streaming.
 pub fn open_output_device(state: &ServerState) -> bool {
-    let prefs = crate::config::load_server_prefs();
+    #[cfg(windows)]
+    let (device, expected_selection) = match StartRequest::resolve(None, None, None, None) {
+        Ok(request) => (request.output_device, request.persist_output_selection),
+        Err(error) => {
+            log::error!("[Audio] {error}");
+            publish_output_error(state, Some(error));
+            return false;
+        }
+    };
+    #[cfg(not(windows))]
+    let device = output::normalize_output_device(&crate::config::load_server_prefs().output_device);
+    #[cfg(not(windows))]
+    let expected_selection: Option<String> = None;
     let resource_dir = state.resource_dir();
-    output::ensure_started(
+    let opened = output::ensure_started(
         &state.audio_output,
-        output::normalize_output_device(&prefs.output_device),
+        device,
         output_buffer_ms(state),
         resource_dir.as_deref(),
-    )
+    );
+    if opened {
+        if let Some(expected_selection) = expected_selection {
+            persist_open_output(state, &expected_selection);
+        }
+    }
+    publish_output_error(
+        state,
+        if opened {
+            None
+        } else {
+            Some("output_open_failed".into())
+        },
+    );
+    opened
+}
+
+fn publish_output_error(state: &ServerState, error: Option<String>) {
+    state
+        .audio_routing
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .error = error;
+    state
+        .events
+        .audio_routing_status_changed(state.get_audio_routing_status());
+}
+
+fn persist_open_output(state: &ServerState, expected_selection: &str) {
+    #[cfg(windows)]
+    if let Some(actual) = state
+        .audio_output
+        .actual_endpoint_id
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+    {
+        if let Err(error) = crate::config::update_server_prefs(|current| {
+            if current.output_endpoint_id.is_none() && current.output_device == expected_selection {
+                current.output_endpoint_id = Some(actual);
+            }
+        }) {
+            log::warn!("[Audio] Could not persist migrated endpoint: {error}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (state, expected_selection);
 }
 
 /// Close the persistent output device. Only called when the process exits,
@@ -212,6 +294,7 @@ pub fn close_output_device(state: &ServerState) {
 
 pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<String, String> {
     let StartRequest {
+        persist_output_selection,
         port,
         mode,
         bind_address,
@@ -258,6 +341,7 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
         audio_rx,
         ready_tx,
         audio_output: state.audio_output.clone(),
+        audio_routing: state.audio_routing.clone(),
         output_device,
         output_buffer_ms: output_buffer_ms(state),
         resource_dir,
@@ -274,6 +358,9 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
     if let Err(error) = await_startup_ready(ready_rx, "Audio output", STARTUP_TIMEOUT).await {
         let error = format!("Failed to start audio output: {error}");
         return fail_start(state, &cancel_token, Vec::new(), error).await;
+    }
+    if let Some(expected_selection) = persist_output_selection {
+        persist_open_output(state, &expected_selection);
     }
 
     if mode == ConnectionMode::Web {

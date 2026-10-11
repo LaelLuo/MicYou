@@ -802,7 +802,7 @@ private fun DesktopAudioControl(state: AppUiState, viewModel: MainViewModel) {
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Connecting -> R.string.desktop_audio_connecting
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Playing -> R.string.desktop_audio_playing
         com.lanrhyme.micyou.audio.DesktopAudioPhase.Error -> when (audio.error) {
-            "bluetooth_required", "bluetooth_disconnected", "bluetooth_route_changed", "bluetooth_route_failed" -> R.string.desktop_audio_bluetooth
+            "bluetooth_required", "bluetooth_disconnected", "bluetooth_route_changed", "bluetooth_route_failed" -> R.string.desktop_audio_output
             "builtin_microphone_required" -> R.string.desktop_audio_microphone
             "audio_focus_lost", "audio_focus_denied" -> R.string.desktop_audio_focus
             "unsupported_android", "unsupported_peer", "unsupported_platform" -> R.string.desktop_audio_unsupported

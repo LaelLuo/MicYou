@@ -10,6 +10,7 @@ export interface ServerPrefs {
   bindAddress: string;
   autoBind: boolean;
   outputDevice: string;
+  outputEndpointId: string | null;
   muteSync: boolean;
 }
 
@@ -47,6 +48,22 @@ export interface ModeStatus {
 }
 
 // ---- Audio ----
+
+export interface OutputEndpoint {
+  id: string;
+  name: string;
+  component: 'cable' | 'hifi' | 'physical' | 'unknownVirtual';
+  backingId: string | null;
+}
+
+export interface AudioRoutingStatus {
+  outputEndpointId: string | null;
+  monitorEndpointId: string | null;
+  aecReferenceId: string | null;
+  aecDesiredReferenceId: string | null;
+  aecState: 'disabled' | 'preparing' | 'running' | 'monitor_conflict' | 'identity_unavailable' | 'capture_failed';
+  error: string | null;
+}
 
 export interface DownlinkSource {
   id: string;

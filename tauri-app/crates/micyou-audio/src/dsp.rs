@@ -968,6 +968,7 @@ pub struct DspProcessor {
     // Stereo is downmixed to mono before AEC, then upmixed back (reference pattern).
     #[cfg(feature = "noise-suppression")]
     aec: Option<AecProcessor>,
+    aec_runtime_ready: bool,
     #[cfg(feature = "noise-suppression")]
     /// Latches model loading or inference failures until the next transport
     /// session, preventing expensive retries on the real-time audio thread.
@@ -1059,6 +1060,7 @@ impl DspProcessor {
 
             #[cfg(feature = "noise-suppression")]
             aec: None,
+            aec_runtime_ready: true,
             #[cfg(feature = "noise-suppression")]
             aec_session_failed: false,
             #[cfg(feature = "noise-suppression")]
@@ -1136,7 +1138,7 @@ impl DspProcessor {
                 "AEC" =>
                 {
                     #[cfg(feature = "noise-suppression")]
-                    if settings.aec_enabled {
+                    if settings.aec_enabled && self.aec_runtime_ready {
                         self.apply_aec(&mut to_process, channels.max(1));
                     }
                 }
@@ -1186,7 +1188,12 @@ impl DspProcessor {
                     // Legacy synthetic plugin stage (may be absent): runs
                     // every registered plugin at this chain position.
                     if let Some(hook) = &mut self.external_hook {
-                        hook(PLUGIN_CHAIN_NODE, &mut to_process, channels.max(1), queued_ms);
+                        hook(
+                            PLUGIN_CHAIN_NODE,
+                            &mut to_process,
+                            channels.max(1),
+                            queued_ms,
+                        );
                     }
                 }
                 node if node.starts_with(PLUGIN_NODE_PREFIX) => {
@@ -1221,6 +1228,14 @@ impl DspProcessor {
 
     pub fn get_spectrums(&self) -> (Vec<f32>, Vec<f32>) {
         (self.raw_spectrum.clone(), self.processed_spectrum.clone())
+    }
+
+    /// 路由暂挂只影响运行态，不改用户保存的 AEC 开关。
+    pub fn set_aec_runtime_ready(&mut self, ready: bool) {
+        if self.aec_runtime_ready != ready {
+            self.reset_aec_session();
+            self.aec_runtime_ready = ready;
+        }
     }
 
     /// Feed far-end (speaker) audio for AEC.
@@ -1900,6 +1915,24 @@ mod tests {
         assert!(!processor.aec_session_failed);
         assert_eq!(processor.aec_failure, None);
         assert!(processor.far_end.take_hop().is_none());
+    }
+
+    #[cfg(feature = "noise-suppression")]
+    #[test]
+    fn routing_gate_discards_reference_without_changing_user_setting() {
+        let settings = Arc::new(RwLock::new(AudioDspSettings {
+            aec_enabled: true,
+            ..Default::default()
+        }));
+        let mut processor = DspProcessor::new(settings.clone(), None);
+        processor.far_end.feed(&vec![1.0; AEC_HOP_LEN]);
+        processor.set_aec_runtime_ready(false);
+        assert!(processor.far_end.take_hop().is_none());
+        assert!(settings.read().unwrap().aec_enabled);
+        processor.far_end.feed(&vec![2.0; AEC_HOP_LEN]);
+        processor.set_aec_runtime_ready(true);
+        assert!(processor.far_end.take_hop().is_none());
+        assert!(settings.read().unwrap().aec_enabled);
     }
 
     #[cfg(feature = "noise-suppression")]

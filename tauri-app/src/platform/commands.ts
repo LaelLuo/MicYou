@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AudioDspSettings,
+  AudioRoutingStatus,
+  OutputEndpoint,
   BlackHoleResult,
   BlackHoleStatus,
   BlurRect,
@@ -46,13 +48,16 @@ export interface Commands {
 
   // Audio devices and DSP
   get_audio_devices: { args: NoArgs; result: string[] };
+  list_output_endpoints: { args: NoArgs; result: OutputEndpoint[] };
+  get_audio_routing_status: { args: NoArgs; result: AudioRoutingStatus };
+  set_output_endpoint: { args: { endpointId: string }; result: AudioRoutingStatus };
   list_downlink_sources: { args: NoArgs; result: DownlinkSource[] };
   get_downlink_status: { args: NoArgs; result: DownlinkStatus };
   set_downlink_source: { args: { sourceId: string | null }; result: DownlinkStatus };
   get_audio_settings: { args: NoArgs; result: Partial<AudioDspSettings> };
   update_audio_settings: { args: { settings: AudioDspSettings }; result: string };
   get_server_prefs: { args: NoArgs; result: ServerPrefs };
-  save_server_prefs: { args: { prefs: ServerPrefs }; result: string };
+  save_server_prefs: { args: { prefs: Omit<ServerPrefs, 'outputDevice' | 'outputEndpointId'> & { outputDevice?: string; outputEndpointId?: string | null } }; result: string };
   check_pipewire: { args: NoArgs; result: PipeWireStatus };
   check_vbcable: { args: NoArgs; result: boolean };
   install_vbcable: { args: NoArgs; result: VBCableResult };

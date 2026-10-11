@@ -1,5 +1,5 @@
 import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { AecStatus, AudioMetrics, DownlinkStatus, PluginDownloadProgress, SpectrumPayload } from './types';
+import type { AecStatus, AudioMetrics, AudioRoutingStatus, DownlinkStatus, PluginDownloadProgress, SpectrumPayload } from './types';
 
 export type { UnlistenFn };
 
@@ -12,6 +12,7 @@ export interface AppEvents {
   'audio-metrics': AudioMetrics;
   'audio-spectrum': SpectrumPayload;
   'aec-status-changed': AecStatus;
+  'audio-routing-status-changed': AudioRoutingStatus;
   'downlink-status-changed': DownlinkStatus;
   'mute-state-changed': boolean;
   'monitoring-enabled-changed': boolean;

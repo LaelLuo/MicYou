@@ -85,6 +85,18 @@ struct Recovery {
 }
 
 impl Recovery {
+    fn replace_selection(&mut self, next: &Option<String>) -> bool {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|(current, _)| current != next)
+        {
+            *self = Self::default();
+            true
+        } else {
+            false
+        }
+    }
     fn opened(
         &mut self,
         manager: &micyou_audio::AudioOutputManager,
@@ -174,15 +186,23 @@ impl AudioOutputHandle {
                 manager.set_endpoint_tracker(endpoint_tracker);
                 manager.set_monitor_endpoint_tracker(monitor_tracker);
                 let mut recovery = Recovery::default();
+                let mut last_monitor_check = Instant::now();
                 loop {
                     let cmd = rx.recv_timeout(HEALTH_CHECK_INTERVAL);
                     recovery.poll(&mut manager);
+                    if last_monitor_check.elapsed() >= HEALTH_CHECK_INTERVAL {
+                        manager.refresh_monitor_endpoint();
+                        last_monitor_check = Instant::now();
+                    }
                     // Sampled before a Push lands, like the request/reply query
                     // this replaces: the DSP's underrun check compares the
                     // level the device has drained down to, not a full ring.
                     published.store(manager.queued_ms().to_bits(), Ordering::Relaxed);
                     match cmd {
                         Ok(AudioOutputCommand::Open(device, buffer_ms, reply)) => {
+                            if recovery.replace_selection(&device) {
+                                manager.close();
+                            }
                             let ok = if manager.is_open() {
                                 true
                             } else {
@@ -299,7 +319,10 @@ impl AudioOutputHandle {
 /// "no explicit device") to the form the audio engine expects.
 pub fn normalize_output_device(raw: &str) -> Option<String> {
     let device = raw.trim();
-    if device.is_empty() || device == "auto" || device == "default" {
+    if device.is_empty()
+        || device.eq_ignore_ascii_case("auto")
+        || device.eq_ignore_ascii_case("default")
+    {
         None
     } else {
         Some(device.to_string())
@@ -315,6 +338,11 @@ pub fn ensure_started(
     buffer_ms: usize,
     resource_dir: Option<&std::path::Path>,
 ) -> bool {
+    #[cfg(windows)]
+    let (device, auto_line) = match device {
+        Some(device) if device.starts_with("auto-line:") => (Some(device[10..].to_string()), true),
+        device => (device, false),
+    };
     #[cfg(target_os = "linux")]
     if device.is_none()
         && crate::platform::pipewire::is_available()
@@ -329,12 +357,52 @@ pub fn ensure_started(
     #[cfg(not(target_os = "linux"))]
     let _ = resource_dir;
 
-    output.ensure_open(device, buffer_ms)
+    if output.ensure_open(device.clone(), buffer_ms) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // Only an unbound ordinary auto selection may try same-line aliases.
+        // Explicit identities and legacy explicit names never silently switch.
+        if auto_line {
+            if let Some(id) = device {
+                if let Ok(endpoints) = micyou_audio::endpoint::list_output_endpoints() {
+                    if let Some(selected) = endpoints.iter().find(|e| {
+                        e.id == id && e.component == micyou_audio::endpoint::Component::Cable
+                    }) {
+                        for alias in endpoints.iter().filter(|e| {
+                            e.id != id && micyou_audio::endpoint::same_line(selected, e)
+                        }) {
+                            if output.ensure_open(Some(alias.id.clone()), buffer_ms) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacing_selection_discards_pending_old_device_recovery() {
+        let old = Some("ordinary".to_string());
+        let mut recovery = Recovery {
+            target: Some((old.clone(), 300)),
+            retry_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        assert!(!recovery.replace_selection(&old));
+        assert!(recovery.retry_at.is_some());
+        assert!(recovery.replace_selection(&Some("new-unavailable".to_string())));
+        assert!(recovery.target.is_none());
+        assert!(recovery.retry_at.is_none());
+        assert!(recovery.stall.is_none());
+    }
 
     #[test]
     fn stall_detector_trips_only_after_timeout_without_ticks() {

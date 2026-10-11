@@ -16,6 +16,7 @@
 //! The per-server audio thread: reorders and FEC-recovers packets, decodes
 //! PCM/Opus, resamples to 48 kHz, runs the DSP chain and feeds the output.
 
+use crate::audio_routing::{AecState, AudioRoutingStatus};
 use crate::events::{AecStatus, SharedEvents, SpectrumPayload};
 use crate::plugins::PluginHost;
 use crate::server::output::{self, AudioOutputHandle};
@@ -26,8 +27,8 @@ use crate::transport::session::AudioStreamEvent;
 use crate::transport::udp::{ActiveAudioSession, SharedActiveAudioSession};
 use micyou_audio::dsp::{AudioDspSettings, DspProcessor};
 use micyou_audio::AecFailure;
-use std::path::PathBuf;
 use micyou_protocol::micyou::AudioPacketMessage;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -44,6 +45,7 @@ pub(super) struct Pipeline {
     pub output_buffer_ms: usize,
     pub resource_dir: Option<PathBuf>,
     pub dsp_settings: Arc<RwLock<AudioDspSettings>>,
+    pub audio_routing: Arc<RwLock<AudioRoutingStatus>>,
     pub plugins: Arc<PluginHost>,
     pub events: SharedEvents,
     pub active_audio_session: SharedActiveAudioSession,
@@ -96,6 +98,174 @@ fn should_capture_loopback(
     runtime_available: bool,
 ) -> bool {
     transport_active && audio_received && aec_enabled && runtime_available
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsAecRouting {
+    desired: Option<String>,
+    last_default_check: Option<std::time::Instant>,
+    capture_failed: bool,
+    processed_generation: Option<u64>,
+    user_enabled: bool,
+}
+
+#[cfg(windows)]
+impl WindowsAecRouting {
+    fn identity(&mut self, id: &str) -> Option<micyou_audio::endpoint::OutputEndpoint> {
+        let endpoint = micyou_audio::endpoint::resolve_endpoint_identity(id).ok()?;
+        if endpoint.backing_id.is_none()
+            || endpoint.component == micyou_audio::endpoint::Component::UnknownVirtual
+        {
+            return None;
+        }
+        Some(endpoint)
+    }
+
+    fn conflict(&mut self, reference: Option<&str>, monitor: Option<&str>) -> AecState {
+        let Some(reference) = reference else {
+            return AecState::IdentityUnavailable;
+        };
+        let Some(reference) = self.identity(reference) else {
+            return AecState::IdentityUnavailable;
+        };
+        let Some(monitor) = monitor else {
+            return AecState::Preparing;
+        };
+        let Some(monitor) = self.identity(monitor) else {
+            return AecState::IdentityUnavailable;
+        };
+        reference_monitor_state(&reference, Some(&monitor))
+    }
+
+    fn sync(
+        &mut self,
+        capture: &micyou_audio::LoopbackCapture,
+        output: &AudioOutputHandle,
+        should_capture: bool,
+        routing: &RwLock<AudioRoutingStatus>,
+        events: &SharedEvents,
+        dsp: &mut DspProcessor,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        if self
+            .last_default_check
+            .is_none_or(|last| now.duration_since(last) >= ACTIVE_POLL)
+        {
+            self.last_default_check = Some(now);
+            let desired = micyou_audio::endpoint::default_render_endpoint_id().ok();
+            if self.desired != desired {
+                capture.reset_session();
+                self.desired = desired;
+                self.capture_failed = false;
+                capture.set_desired_endpoint(self.desired.clone());
+            }
+        }
+        let monitor = output
+            .monitor_endpoint_id
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let primary = output
+            .actual_endpoint_id
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut error = None;
+        let mut state = if should_capture {
+            self.conflict(self.desired.clone().as_deref(), monitor.as_deref())
+        } else {
+            AecState::Disabled
+        };
+        if matches!(
+            state,
+            AecState::Disabled | AecState::MonitorConflict | AecState::IdentityUnavailable
+        ) {
+            if capture.is_active() || capture.reference_state().ready {
+                capture.reset_session();
+            }
+        } else if self.capture_failed {
+            state = AecState::CaptureFailed;
+        } else if !capture.is_active() {
+            // 超时句柄仍归旧代所有：只在真实退出后重建，不能以清空 ready 代替退出。
+            if capture.capture_thread_stopped() {
+                let failure = capture.take_failure_reason();
+                if failure.is_some() {
+                    state = AecState::CaptureFailed;
+                    self.capture_failed = true;
+                } else if let Some(desired) = self.desired.clone() {
+                    if capture.start_for_endpoint(desired).is_err() {
+                        state = AecState::CaptureFailed;
+                        self.capture_failed = true;
+                    }
+                }
+            } else {
+                state = AecState::CaptureFailed;
+                error = Some("aec_stop_timeout".into());
+            }
+        }
+        let reference = capture.reference_state();
+        if self.processed_generation != Some(reference.generation) {
+            dsp.reset_aec_session();
+            self.processed_generation = Some(reference.generation);
+        }
+        if reference.ready && state == AecState::Preparing {
+            state = self.conflict(reference.actual_endpoint_id.as_deref(), monitor.as_deref());
+            if state == AecState::Preparing {
+                state = AecState::Running;
+            } else {
+                capture.reset_session();
+            }
+        }
+        let reference = capture.reference_state();
+        let mut status = AudioRoutingStatus {
+            output_endpoint_id: primary,
+            monitor_endpoint_id: monitor,
+            aec_reference_id: reference.actual_endpoint_id,
+            aec_desired_reference_id: self.desired.clone(),
+            aec_state: state,
+            error,
+        };
+        let changed = {
+            let mut current = routing.write().unwrap_or_else(|p| p.into_inner());
+            status.error = merge_routing_error(current.error.clone(), status.error);
+            if *current == status {
+                false
+            } else {
+                *current = status.clone();
+                true
+            }
+        };
+        if changed {
+            events.audio_routing_status_changed(status);
+        }
+        state == AecState::Running
+    }
+}
+
+#[cfg(windows)]
+fn merge_routing_error(current: Option<String>, transient: Option<String>) -> Option<String> {
+    current
+        .filter(|error| error != "aec_stop_timeout")
+        .or(transient)
+}
+
+#[cfg(windows)]
+fn reference_monitor_state(
+    reference: &micyou_audio::endpoint::OutputEndpoint,
+    monitor: Option<&micyou_audio::endpoint::OutputEndpoint>,
+) -> AecState {
+    use micyou_audio::endpoint::{same_line, Component};
+    let known = |endpoint: &micyou_audio::endpoint::OutputEndpoint| {
+        endpoint.backing_id.is_some() && endpoint.component != Component::UnknownVirtual
+    };
+    if !known(reference) || monitor.is_some_and(|endpoint| !known(endpoint)) {
+        AecState::IdentityUnavailable
+    } else if monitor.is_some_and(|monitor| same_line(reference, monitor)) {
+        AecState::MonitorConflict
+    } else {
+        AecState::Preparing
+    }
 }
 
 /// Decode little-endian PCM into f32 samples. Returns false for an unknown
@@ -176,16 +346,29 @@ impl StreamDecoder {
         if audio.codec == micyou_protocol::CODEC_OPUS {
             self.decode_opus(&audio.buffer, sample_rate, channels, out);
         } else if !decode_pcm(audio.audio_format, &audio.buffer, out) {
-            self.report_failure(format_args!("Unsupported audio format: {}", audio.audio_format));
+            self.report_failure(format_args!(
+                "Unsupported audio format: {}",
+                audio.audio_format
+            ));
         }
         if !out.is_empty() && sample_rate != OUTPUT_RATE {
             self.resample(sample_rate, channels, out);
         }
     }
 
-    fn decode_opus(&mut self, buffer: &[u8], sample_rate: u32, channels: usize, out: &mut Vec<f32>) {
+    fn decode_opus(
+        &mut self,
+        buffer: &[u8],
+        sample_rate: u32,
+        channels: usize,
+        out: &mut Vec<f32>,
+    ) {
         let key = (sample_rate, channels);
-        if self.opus.as_ref().is_none_or(|(current, _)| *current != key) {
+        if self
+            .opus
+            .as_ref()
+            .is_none_or(|(current, _)| *current != key)
+        {
             self.opus = opus::Channels::from_channel_count(channels)
                 .and_then(|ch| opus::Decoder::new(sample_rate, ch).ok())
                 .map(|decoder| (key, decoder));
@@ -208,7 +391,11 @@ impl StreamDecoder {
 
     fn resample(&mut self, sample_rate: u32, channels: usize, samples: &mut Vec<f32>) {
         let key = (sample_rate, channels);
-        if self.resampler.as_ref().is_none_or(|(current, _)| *current != key) {
+        if self
+            .resampler
+            .as_ref()
+            .is_none_or(|(current, _)| *current != key)
+        {
             let resampler = micyou_audio::RubatoResampler::new(sample_rate, OUTPUT_RATE, channels)
                 .inspect_err(|e| log::error!("[Audio] Failed to create resampler: {e}"))
                 .ok();
@@ -253,6 +440,7 @@ fn run(pipeline: Pipeline) {
         output_buffer_ms,
         resource_dir,
         dsp_settings,
+        audio_routing,
         plugins,
         events,
         active_audio_session,
@@ -284,7 +472,15 @@ fn run(pipeline: Pipeline) {
         output_buffer_ms,
         resource_dir.as_deref(),
     ) {
-        log::error!("[Audio] Output device unavailable; audio will be silent");
+        log::error!("[Audio] Output device unavailable");
+        let status = {
+            let mut status = audio_routing.write().unwrap_or_else(|p| p.into_inner());
+            status.error = Some("output_open_failed".into());
+            status.clone()
+        };
+        events.audio_routing_status_changed(status);
+        let _ = ready_tx.send(Err("output_open_failed".into()));
+        return;
     }
     let _ = ready_tx.send(Ok(()));
     let mut dsp_processor = DspProcessor::new(dsp_settings.clone(), resource_dir);
@@ -308,6 +504,8 @@ fn run(pipeline: Pipeline) {
 
     let mut audio_received_for_session = false;
     let mut aec_runtime_available = true;
+    #[cfg(windows)]
+    let mut routing_gate = WindowsAecRouting::default();
     // A newly started server always begins with a fresh runtime state, even
     // before the first client session arrives.
     if loopback.is_some() {
@@ -316,7 +514,14 @@ fn run(pipeline: Pipeline) {
     // Sync the AEC far-end capture with actual audio flow. A control session
     // alone is not enough: while waiting for the first valid audio packet,
     // there is no microphone stream that needs an echo reference.
-    let sync_loopback = |audio_received: &mut bool, runtime_available: &mut bool| {
+    let mut sync_loopback = |audio_received: &mut bool,
+                             runtime_available: &mut bool,
+                             dsp: &mut DspProcessor,
+                             new_session: bool| {
+        #[cfg(windows)]
+        if new_session {
+            routing_gate.capture_failed = false;
+        }
         let transport_active = !matches!(
             *active_audio_session
                 .read()
@@ -334,6 +539,16 @@ fn run(pipeline: Pipeline) {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .aec_enabled;
+        #[cfg(windows)]
+        {
+            if aec_enabled && !routing_gate.user_enabled {
+                routing_gate.capture_failed = false;
+                lb.take_failure_reason();
+                dsp.reset_aec_session();
+                restore_aec_runtime(runtime_available, &dsp_settings, &events);
+            }
+            routing_gate.user_enabled = aec_enabled;
+        }
         let should_capture = should_capture_loopback(
             transport_active,
             *audio_received,
@@ -341,34 +556,59 @@ fn run(pipeline: Pipeline) {
             *runtime_available,
         );
 
-        if !should_capture {
-            if lb.is_active() {
-                lb.stop();
-            }
-            return transport_active;
-        }
-        if lb.is_active() {
-            return transport_active;
+        #[cfg(windows)]
+        {
+            let ready = routing_gate.sync(
+                lb,
+                &audio_output,
+                should_capture,
+                &audio_routing,
+                &events,
+                dsp,
+            );
+            dsp.set_aec_runtime_ready(ready);
+            transport_active
         }
 
-        let failure = lb.take_failure_reason().or_else(|| lb.start().err());
-        if let Some(reason) = failure {
-            disable_aec_runtime(runtime_available, &events, reason);
-        } else {
-            log::info!("[Audio] Starting speaker loopback capture for AEC");
+        #[cfg(not(windows))]
+        {
+            if !should_capture {
+                if lb.is_active() {
+                    lb.stop();
+                }
+                return transport_active;
+            }
+            if lb.is_active() {
+                return transport_active;
+            }
+
+            let failure = lb.take_failure_reason().or_else(|| lb.start().err());
+            if let Some(reason) = failure {
+                disable_aec_runtime(runtime_available, &events, reason);
+            } else {
+                log::info!("[Audio] Starting speaker loopback capture for AEC");
+            }
+            transport_active
         }
-        transport_active
     };
 
     let mut session_active = false;
     loop {
-        let wait = if session_active { ACTIVE_POLL } else { IDLE_POLL };
+        let wait = if session_active {
+            ACTIVE_POLL
+        } else {
+            IDLE_POLL
+        };
         let event = match recv_within(&runtime, &mut audio_rx, wait) {
             Ok(Some(event)) => event,
             Ok(None) => break,
             Err(_) => {
-                session_active =
-                    sync_loopback(&mut audio_received_for_session, &mut aec_runtime_available);
+                session_active = sync_loopback(
+                    &mut audio_received_for_session,
+                    &mut aec_runtime_available,
+                    &mut dsp_processor,
+                    false,
+                );
                 continue;
             }
         };
@@ -386,14 +626,24 @@ fn run(pipeline: Pipeline) {
                     restore_aec_runtime(&mut aec_runtime_available, &dsp_settings, &events);
                 }
                 dsp_processor.reset_aec_session();
+                sync_loopback(
+                    &mut audio_received_for_session,
+                    &mut aec_runtime_available,
+                    &mut dsp_processor,
+                    true,
+                );
                 decoder.reset();
                 jb.prepare_transport_session_epoch(expected, epoch);
                 continue;
             }
             AudioStreamEvent::Packet { packet, epoch } => {
                 audio_received_for_session = true;
-                session_active =
-                    sync_loopback(&mut audio_received_for_session, &mut aec_runtime_available);
+                session_active = sync_loopback(
+                    &mut audio_received_for_session,
+                    &mut aec_runtime_available,
+                    &mut dsp_processor,
+                    false,
+                );
                 jb.push_epoch(packet, epoch);
             }
         }
@@ -412,16 +662,28 @@ fn run(pipeline: Pipeline) {
                 let level = rms(&pcm_f32);
                 (level, level)
             } else {
+                #[cfg(windows)]
+                sync_loopback(
+                    &mut audio_received_for_session,
+                    &mut aec_runtime_available,
+                    &mut dsp_processor,
+                    false,
+                );
                 // The loopback capture is the true echo source the phone mic
                 // picks up. Feed one mono reference sample per near-end frame
                 // so packet sizes or input rates cannot make the two drift.
                 let near_frames = pcm_f32.len() / channels;
                 if let Some(far_data) = loopback
                     .as_ref()
-                    .filter(|capture| capture.is_active())
+                    .filter(|capture| {
+                        capture.is_active() && (!cfg!(windows) || capture.reference_state().ready)
+                    })
                     .map(|capture| capture.read(near_frames))
                 {
                     dsp_processor.set_far_end_audio(&far_data);
+                } else {
+                    #[cfg(windows)]
+                    dsp_processor.set_aec_runtime_ready(false);
                 }
                 let levels =
                     dsp_processor.process(&mut pcm_f32, channels, audio_output.queued_ms());
@@ -446,7 +708,11 @@ fn run(pipeline: Pipeline) {
             if !frame_counter.is_multiple_of(6) {
                 continue;
             }
-            let level = if muted { 0 } else { (processed_rms * 500.0).min(100.0) as u32 };
+            let level = if muted {
+                0
+            } else {
+                (processed_rms * 500.0).min(100.0) as u32
+            };
             events.audio_level(level);
             if spectrum_streaming_enabled.load(Ordering::Acquire) {
                 let (mut raw, mut processed) = dsp_processor.get_spectrums();
@@ -472,6 +738,69 @@ fn run(pipeline: Pipeline) {
 mod tests {
     use super::{decode_pcm, recv_within, should_capture_loopback};
     use std::time::Duration;
+
+    #[cfg(windows)]
+    #[test]
+    fn desired_reference_still_predicts_conflict_after_actual_is_cleared() {
+        use crate::audio_routing::AecState;
+        use micyou_audio::endpoint::{Component, OutputEndpoint};
+        let reference = OutputEndpoint {
+            id: "2ch".into(),
+            name: String::new(),
+            component: Component::Cable,
+            backing_id: Some("ordinary".into()),
+        };
+        let monitor = OutputEndpoint {
+            id: "16ch".into(),
+            ..reference.clone()
+        };
+        assert_eq!(
+            super::reference_monitor_state(&reference, Some(&monitor)),
+            AecState::MonitorConflict
+        );
+        assert_eq!(
+            super::reference_monitor_state(&reference, None),
+            AecState::Preparing
+        );
+        let independent = OutputEndpoint {
+            component: Component::Hifi,
+            backing_id: Some("hifi".into()),
+            ..monitor
+        };
+        assert_eq!(
+            super::reference_monitor_state(&reference, Some(&independent)),
+            AecState::Preparing
+        );
+        let unknown = OutputEndpoint {
+            backing_id: None,
+            ..independent
+        };
+        assert_eq!(
+            super::reference_monitor_state(&reference, Some(&unknown)),
+            AecState::IdentityUnavailable
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn routing_errors_preserve_output_failure_and_clear_recovered_aec_timeout() {
+        assert_eq!(
+            super::merge_routing_error(None, Some("aec_stop_timeout".into())).as_deref(),
+            Some("aec_stop_timeout")
+        );
+        assert_eq!(
+            super::merge_routing_error(Some("aec_stop_timeout".into()), None),
+            None
+        );
+        assert_eq!(
+            super::merge_routing_error(
+                Some("output_open_failed".into()),
+                Some("aec_stop_timeout".into())
+            )
+            .as_deref(),
+            Some("output_open_failed")
+        );
+    }
 
     #[test]
     fn recv_within_works_on_a_plain_thread() {

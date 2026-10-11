@@ -24,7 +24,11 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use micyou_core::config::ServerPrefs;
 use micyou_core::micyou_audio::dsp::AudioDspSettings;
+use micyou_core::server::ServerState;
+use micyou_core::stats::AudioMetrics;
+use micyou_core::transport::tcp::DeviceInfo;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -36,10 +40,6 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-use micyou_core::config::ServerPrefs;
-use micyou_core::server::ServerState;
-use micyou_core::stats::AudioMetrics;
-use micyou_core::transport::tcp::DeviceInfo;
 
 /// Vertical split of the whole screen: [title, tabs, body, footer].
 fn split_layout(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -1545,7 +1545,15 @@ fn sync_settings(app: &mut TuiApp, state: &ServerState) {
 
 /// Persist the edited connection settings to the shared server.json.
 fn sync_server_prefs(app: &mut TuiApp) {
-    if let Err(e) = micyou_core::config::save_server_prefs(&app.prefs) {
+    let patch = micyou_core::config::ServerPrefsPatch {
+        port: Some(app.prefs.port),
+        web_port: Some(app.prefs.web_port),
+        mode: Some(app.prefs.mode.clone()),
+        auto_bind: Some(app.prefs.auto_bind),
+        bind_address: Some(app.prefs.bind_address.clone()),
+        ..Default::default()
+    };
+    if let Err(e) = micyou_core::config::patch_server_prefs(patch) {
         app.log(format!("[err] {e}"));
     }
 }
@@ -1576,7 +1584,9 @@ mod tests {
     #[test]
     fn log_records_land_on_the_logs_page() {
         let mut app = TuiApp::new(AudioDspSettings::default(), 8554, "wifi".to_string());
-        app.on_event(Event::Log("[warn] [Audio] Output stream failed".to_string()));
+        app.on_event(Event::Log(
+            "[warn] [Audio] Output stream failed".to_string(),
+        ));
         assert_eq!(
             app.logs.back().map(String::as_str),
             Some("[warn] [Audio] Output stream failed")

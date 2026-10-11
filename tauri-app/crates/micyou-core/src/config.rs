@@ -170,6 +170,8 @@ pub struct ServerPrefs {
     pub auto_bind: bool,
     /// Selected output audio device name.
     pub output_device: String,
+    /// Authoritative Windows endpoint identity; names are migration/display only.
+    pub output_endpoint_id: Option<String>,
     /// 独立回环来源；None 表示跟随默认播放端点，开启状态不落盘。
     pub downlink_source_id: Option<String>,
     /// Whether mute state is synchronized with the mobile client in both
@@ -188,6 +190,7 @@ impl Default for ServerPrefs {
             bind_address: "0.0.0.0".to_string(),
             auto_bind: true,
             output_device: String::new(),
+            output_endpoint_id: None,
             downlink_source_id: None,
             mute_sync: true,
         }
@@ -202,7 +205,107 @@ pub fn load_server_prefs() -> ServerPrefs {
 /// Persist connection settings to server.json (GUI, CLI and TUI share this file).
 pub fn save_server_prefs(prefs: &ServerPrefs) -> Result<(), String> {
     let _guard = SERVER_PREFS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
-    save_json(&server_prefs_path(), prefs)
+    let current = load_server_prefs();
+    let mut next = prefs.clone();
+    next.downlink_source_id = current.downlink_source_id.clone();
+    if next.output_device != current.output_device
+        && next.output_endpoint_id == current.output_endpoint_id
+    {
+        next.output_endpoint_id = None;
+    }
+    normalize_selection(&current, &mut next)?;
+    save_json(&server_prefs_path(), &next)
+}
+
+fn normalize_selection(current: &ServerPrefs, next: &mut ServerPrefs) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if next.output_device != current.output_device
+            || next.output_endpoint_id != current.output_endpoint_id
+        {
+            let endpoints = micyou_audio::endpoint::list_output_endpoints()?;
+            normalize_selection_from_endpoints(next, &endpoints)?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (current, next);
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn normalize_selection_from_endpoints(
+    next: &mut ServerPrefs,
+    endpoints: &[micyou_audio::endpoint::OutputEndpoint],
+) -> Result<(), String> {
+    let selected = crate::audio_routing::resolve_endpoint(
+        endpoints,
+        next.output_endpoint_id.as_deref(),
+        &next.output_device,
+    )?;
+    // Auto remains unbound until an alias really opens. A pre-bound first
+    // alias would suppress the ordinary-line fallback on an in-use alias.
+    if next.output_endpoint_id.is_none()
+        && crate::server::output::normalize_output_device(&next.output_device).is_none()
+    {
+        return Ok(());
+    }
+    next.output_endpoint_id = Some(selected.id.clone());
+    next.output_device = selected.name.clone();
+    Ok(())
+}
+
+/// Sparse updates preserve fields owned by another frontend under one lock.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPrefsPatch {
+    pub port: Option<u16>,
+    pub web_port: Option<u16>,
+    pub mode: Option<String>,
+    pub bind_address: Option<String>,
+    pub auto_bind: Option<bool>,
+    pub output_device: Option<String>,
+    pub output_endpoint_id: Option<String>,
+    pub mute_sync: Option<bool>,
+}
+
+pub fn patch_server_prefs(patch: ServerPrefsPatch) -> Result<(), String> {
+    let _guard = SERVER_PREFS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let current = load_server_prefs();
+    let mut next = merge_patch(&current, patch);
+    normalize_selection(&current, &mut next)?;
+    save_json(&server_prefs_path(), &next)
+}
+
+fn merge_patch(current: &ServerPrefs, patch: ServerPrefsPatch) -> ServerPrefs {
+    let mut next = current.clone();
+    if patch.output_device.is_some() && patch.output_endpoint_id.is_none() {
+        next.output_endpoint_id = None;
+    }
+    if let Some(v) = patch.port {
+        next.port = v;
+    }
+    if let Some(v) = patch.web_port {
+        next.web_port = v;
+    }
+    if let Some(v) = patch.mode {
+        next.mode = v;
+    }
+    if let Some(v) = patch.bind_address {
+        next.bind_address = v;
+    }
+    if let Some(v) = patch.auto_bind {
+        next.auto_bind = v;
+    }
+    if let Some(v) = patch.output_device {
+        next.output_device = v;
+    }
+    if let Some(v) = patch.output_endpoint_id {
+        next.output_endpoint_id = Some(v);
+    }
+    if let Some(v) = patch.mute_sync {
+        next.mute_sync = v;
+    }
+    next
 }
 
 static SERVER_PREFS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -216,16 +319,64 @@ pub fn update_server_prefs(update: impl FnOnce(&mut ServerPrefs)) -> Result<(), 
 }
 
 pub fn save_connection_prefs(prefs: &ServerPrefs) -> Result<(), String> {
-    update_server_prefs(|current| {
-        let source = current.downlink_source_id.clone();
-        *current = prefs.clone();
-        current.downlink_source_id = source;
-    })
+    save_server_prefs(prefs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saving_auto_validates_line_without_binding_unopened_alias() {
+        use micyou_audio::endpoint::{Component, OutputEndpoint};
+        let endpoints = vec![OutputEndpoint {
+            id: "first-in-use".into(),
+            name: "Cable".into(),
+            component: Component::Cable,
+            backing_id: Some("ordinary".into()),
+        }];
+        let mut prefs = ServerPrefs {
+            output_device: "auto".into(),
+            ..Default::default()
+        };
+        normalize_selection_from_endpoints(&mut prefs, &endpoints).unwrap();
+        assert!(prefs.output_endpoint_id.is_none());
+        assert_eq!(prefs.output_device, "auto");
+        prefs.output_device = "Cable".into();
+        normalize_selection_from_endpoints(&mut prefs, &endpoints).unwrap();
+        assert_eq!(prefs.output_endpoint_id.as_deref(), Some("first-in-use"));
+    }
+    #[test]
+    fn sparse_updates_preserve_route_and_other_frontend_source() {
+        let current = ServerPrefs {
+            output_device: "Cable".into(),
+            output_endpoint_id: Some("stable-id".into()),
+            downlink_source_id: Some("hifi".into()),
+            ..Default::default()
+        };
+        let patch: ServerPrefsPatch = serde_json::from_str(r#"{"port":18554}"#).unwrap();
+        let next = merge_patch(&current, patch);
+        assert_eq!(next.output_endpoint_id, current.output_endpoint_id);
+        assert_eq!(next.output_device, current.output_device);
+        assert_eq!(next.downlink_source_id, current.downlink_source_id);
+        assert_eq!(next.port, 18554);
+        let changed = merge_patch(
+            &current,
+            ServerPrefsPatch {
+                output_device: Some("New cable".into()),
+                ..Default::default()
+            },
+        );
+        assert!(changed.output_endpoint_id.is_none());
+        let renamed = merge_patch(
+            &current,
+            ServerPrefsPatch {
+                output_device: Some("Renamed".into()),
+                output_endpoint_id: Some("stable-id".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(renamed.output_endpoint_id, current.output_endpoint_id);
+    }
     #[test]
     fn legacy_config_defaults_source_without_persisting_enable_state() {
         let prefs: ServerPrefs =

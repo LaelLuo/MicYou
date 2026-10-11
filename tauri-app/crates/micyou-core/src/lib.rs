@@ -22,6 +22,7 @@
 
 pub mod about;
 pub mod config;
+pub mod audio_routing;
 pub mod discovery;
 pub mod events;
 pub mod host;

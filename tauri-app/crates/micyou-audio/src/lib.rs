@@ -17,6 +17,7 @@ pub mod aec;
 #[cfg(feature = "dsp")]
 pub mod dsp;
 pub mod engine;
+pub mod endpoint;
 pub mod loopback;
 pub mod mixer;
 pub mod stereo_loopback;

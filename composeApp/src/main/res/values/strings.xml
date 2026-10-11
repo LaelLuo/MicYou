@@ -395,10 +395,10 @@
     <string name="desktop_audio_disconnected">Connect to a computer first</string>
     <string name="desktop_audio_checking">Checking computer support…</string>
     <string name="desktop_audio_unsupported">This computer or Android version does not support playback</string>
-    <string name="desktop_audio_ready">Off · requires Bluetooth headphones</string>
-    <string name="desktop_audio_connecting">Preparing Bluetooth playback…</string>
-    <string name="desktop_audio_playing">Playing through Bluetooth headphones</string>
-    <string name="desktop_audio_bluetooth">Connect Bluetooth headphones, then turn playback on again</string>
+    <string name="desktop_audio_ready">Off · follows system media output</string>
+    <string name="desktop_audio_connecting">Preparing playback…</string>
+    <string name="desktop_audio_playing">Playing through system media output</string>
+    <string name="desktop_audio_output">Playback stopped; check the system media output and try again</string>
     <string name="desktop_audio_microphone">Cannot confirm the phone microphone; playback stopped</string>
     <string name="desktop_audio_focus">Audio focus unavailable; turn playback on again when ready</string>
     <string name="desktop_audio_feedback">Choose a computer source different from the microphone output</string>

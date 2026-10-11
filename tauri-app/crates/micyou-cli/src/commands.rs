@@ -15,19 +15,33 @@
 
 use micyou_core::config;
 use micyou_core::micyou_audio::dsp::AudioDspSettings;
+use micyou_core::mode_lock as lock;
 #[cfg(target_os = "windows")]
 use std::process::exit;
-use micyou_core::mode_lock as lock;
 
 pub fn cmd_devices() {
-    let devices = micyou_core::settings::audio_devices();
-    if devices.is_empty() {
-        println!("no audio output devices found");
-        return;
+    #[cfg(windows)]
+    {
+        match micyou_core::micyou_audio::endpoint::list_output_endpoints() {
+            Ok(devices) => {
+                for device in devices {
+                    println!("{}  {}  {:?}", device.id, device.name, device.component);
+                }
+            }
+            Err(error) => eprintln!("{error}"),
+        }
     }
-    println!("audio output devices:");
-    for (i, name) in devices.iter().enumerate() {
-        println!("  {}. {name}", i + 1);
+    #[cfg(not(windows))]
+    {
+        let devices = micyou_core::settings::audio_devices();
+        if devices.is_empty() {
+            println!("no audio output devices found");
+            return;
+        }
+        println!("audio output devices:");
+        for (i, name) in devices.iter().enumerate() {
+            println!("  {}. {name}", i + 1);
+        }
     }
 }
 
@@ -125,10 +139,7 @@ pub fn cmd_settings_set(key: String, value: String) -> Result<(), String> {
         }
     }
     settings = serde_json::from_value(current).map_err(|e| e.to_string())?;
-    if key == "aecEnabled"
-        && settings.aec_enabled
-        && !micyou_core::settings::aec_supported()
-    {
+    if key == "aecEnabled" && settings.aec_enabled && !micyou_core::settings::aec_supported() {
         return Err("AEC is not supported on macOS".to_string());
     }
     config::save_dsp_settings(&settings)?;
@@ -271,9 +282,10 @@ pub fn cmd_server_get() {
     println!("autoBind: {}", prefs.auto_bind);
     println!("outputDevice: {}", prefs.output_device);
     println!(
-        "file: {}",
-        config::server_prefs_path().display()
+        "outputEndpointId: {}",
+        prefs.output_endpoint_id.as_deref().unwrap_or("")
     );
+    println!("file: {}", config::server_prefs_path().display());
 }
 
 pub fn cmd_server_set(key: &str, value: &str) -> Result<(), String> {
@@ -313,13 +325,27 @@ pub fn cmd_server_set(key: &str, value: &str) -> Result<(), String> {
         "outputDevice" => {
             prefs.output_device = value.to_string();
         }
+        "outputEndpointId" => {
+            prefs.output_endpoint_id = Some(value.to_string());
+        }
         _ => {
             return Err(format!(
-                "unknown key '{key}' (expected port, webPort, mode, bindAddress, autoBind, outputDevice)"
+                "unknown key '{key}' (expected port, webPort, mode, bindAddress, autoBind, outputDevice, outputEndpointId)"
             ));
         }
     }
-    config::save_server_prefs(&prefs)?;
+    let mut patch = config::ServerPrefsPatch::default();
+    match key {
+        "port" => patch.port = Some(prefs.port),
+        "webPort" => patch.web_port = Some(prefs.web_port),
+        "mode" => patch.mode = Some(prefs.mode),
+        "bindAddress" => patch.bind_address = Some(prefs.bind_address),
+        "autoBind" => patch.auto_bind = Some(prefs.auto_bind),
+        "outputDevice" => patch.output_device = Some(prefs.output_device),
+        "outputEndpointId" => patch.output_endpoint_id = prefs.output_endpoint_id,
+        _ => unreachable!(),
+    }
+    config::patch_server_prefs(patch)?;
     println!("{key} = {value}");
     Ok(())
 }

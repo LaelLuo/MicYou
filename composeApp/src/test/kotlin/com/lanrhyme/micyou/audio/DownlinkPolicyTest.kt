@@ -1,11 +1,22 @@
 package com.lanrhyme.micyou.audio
 
+import android.media.AudioManager
 import com.lanrhyme.micyou.network.DownlinkAudioMessage
 import com.lanrhyme.micyou.network.DownlinkStateMessage
 import org.junit.Assert.*
 import org.junit.Test
 
 class DownlinkPolicyTest {
+    @Test fun `only actual audio focus loss requires manual playback recovery`() {
+        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN))
+        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT))
+        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK))
+        assertFalse(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE))
+        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS))
+        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT))
+        assertTrue(shouldStopForAudioFocus(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK))
+    }
+
     private fun active(request: Long = 1, stream: Long = 2) = DownlinkStateMessage(
         sessionId = 42, requestId = request, streamId = stream, supported = true, active = true,
         sampleRate = 48000, channelCount = 2, audioFormat = 2)
@@ -88,7 +99,7 @@ class DownlinkPolicyTest {
         assertTrue(gate.isCurrentRequest(second))
     }
 
-    @Test fun `native latency includes route warmup silence and resets after flush`() {
+    @Test fun `native queue counts all written PCM and resets after flush`() {
         val counter = PlaybackQueueCounter()
         counter.recordBytes(3840) // 静音路由预热。
         counter.recordBytes(3840) // 首帧真实 PCM。

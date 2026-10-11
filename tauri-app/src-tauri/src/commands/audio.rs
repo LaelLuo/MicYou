@@ -31,6 +31,28 @@ pub async fn get_audio_devices() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+pub async fn list_output_endpoints(
+) -> Result<Vec<micyou_core::micyou_audio::endpoint::OutputEndpoint>, String> {
+    super::blocking(micyou_core::micyou_audio::endpoint::list_output_endpoints).await
+}
+
+#[tauri::command]
+pub fn get_audio_routing_status(
+    state: State<'_, ServerState>,
+) -> micyou_core::audio_routing::AudioRoutingStatus {
+    state.get_audio_routing_status()
+}
+
+#[tauri::command]
+pub async fn set_output_endpoint(
+    state: State<'_, ServerState>,
+    endpoint_id: String,
+) -> Result<micyou_core::audio_routing::AudioRoutingStatus, String> {
+    let state = state.inner();
+    state.set_output_endpoint(endpoint_id)
+}
+
+#[tauri::command]
 pub async fn list_downlink_sources(
     state: State<'_, ServerState>,
 ) -> Result<Vec<DownlinkSource>, String> {
@@ -70,8 +92,8 @@ pub fn get_server_prefs() -> ServerPrefs {
 }
 
 #[tauri::command]
-pub fn save_server_prefs(prefs: ServerPrefs) -> Result<String, String> {
-    config::save_connection_prefs(&prefs)?;
+pub fn save_server_prefs(prefs: config::ServerPrefsPatch) -> Result<String, String> {
+    config::patch_server_prefs(prefs)?;
     Ok("Server prefs saved".to_string())
 }
 

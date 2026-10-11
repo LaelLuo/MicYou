@@ -15,9 +15,11 @@ const busy = computed(() => loading.value || saving.value);
 const errorKeys = new Set([
   'unsupported_platform', 'unsupported_peer', 'source_unavailable', 'feedback_source',
   'capture_failed', 'invalid_frame', 'transport_stalled', 'load_failed', 'save_failed',
+  'identity_unavailable',
 ]);
 const errorMessage = computed(() => {
   const code = operationError.value ?? status.value?.error;
+  if (code === 'identity_unavailable') return t('routing.identityError');
   return code ? t(`downlink.errors.${errorKeys.has(code) ? code : 'unknown'}`) : null;
 });
 const stateLabel = computed(() => {

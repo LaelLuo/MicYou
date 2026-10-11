@@ -13,7 +13,7 @@
  * GNU General Public License for more details.
  */
 
-use micyou_core::server::service::{ConnectionMode, StartRequest};
+use micyou_core::server::service::StartRequest;
 use micyou_core::server::ServerState;
 use micyou_core::settings::StreamingStatus;
 use tauri::{AppHandle, State};
@@ -26,12 +26,7 @@ pub async fn start_server(
     bind_address: Option<String>,
     output_device: Option<String>,
 ) -> Result<String, String> {
-    let request = StartRequest {
-        port,
-        mode: mode.parse::<ConnectionMode>()?,
-        bind_address,
-        output_device,
-    };
+    let request = StartRequest::resolve(Some(port), Some(&mode), output_device, bind_address)?;
     micyou_core::server::start_server(&state, request).await
 }
 
@@ -41,7 +36,9 @@ pub async fn stop_server(state: State<'_, ServerState>) -> Result<String, String
 }
 
 #[tauri::command]
-pub async fn get_streaming_status(state: State<'_, ServerState>) -> Result<StreamingStatus, String> {
+pub async fn get_streaming_status(
+    state: State<'_, ServerState>,
+) -> Result<StreamingStatus, String> {
     Ok(state.streaming_status().await)
 }
 

@@ -1,6 +1,6 @@
 import { nextTick, reactive, ref, watch } from 'vue';
 import { command, emitToWindow, onEvent, type UnlistenFn } from '@/platform';
-import { isMacOS } from '@/shared/lib/os';
+import { isMacOS, isWindows } from '@/shared/lib/os';
 
 // AEC runs on Linux and Windows; macOS has no backend for it.
 export const isAecSupported = !isMacOS;
@@ -118,7 +118,7 @@ async function syncSettingsToBackend() {
 
 function saveSettings() {
   // The main window owns server.json and persists the output device.
-  notifyOutputDevice(settings.audioDevice);
+  if (!isWindows) notifyOutputDevice(settings.audioDevice);
   void syncSettingsToBackend();
 }
 

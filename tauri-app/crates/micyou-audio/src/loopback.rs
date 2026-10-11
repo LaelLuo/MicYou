@@ -38,6 +38,15 @@ pub struct LoopbackCapture {
     buffer: Arc<Mutex<HeapRb<f32>>>,
     failure: Arc<Mutex<Option<AecFailure>>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    reference: Arc<Mutex<ReferenceState>>,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct ReferenceState {
+    pub generation: u64,
+    pub desired_endpoint_id: Option<String>,
+    pub actual_endpoint_id: Option<String>,
+    pub ready: bool,
 }
 
 impl LoopbackCapture {
@@ -47,6 +56,7 @@ impl LoopbackCapture {
             buffer: Arc::new(Mutex::new(HeapRb::new(TARGET_RATE as usize * RING_BUF_SEC))),
             failure: Arc::new(Mutex::new(None)),
             thread: Mutex::new(None),
+            reference: Arc::new(Mutex::new(ReferenceState::default())),
         }
     }
 
@@ -71,6 +81,14 @@ impl LoopbackCapture {
         *lock(&self.failure) = None;
         lock(&self.buffer).clear();
         self.active.store(true, Ordering::Relaxed);
+        let (generation, desired) = {
+            let mut reference = lock(&self.reference);
+            reference.generation = reference.generation.wrapping_add(1);
+            reference.ready = false;
+            reference.actual_endpoint_id = None;
+            (reference.generation, reference.desired_endpoint_id.clone())
+        };
+        let reference = self.reference.clone();
 
         let active = self.active.clone();
         let buffer = self.buffer.clone();
@@ -80,7 +98,14 @@ impl LoopbackCapture {
             .name("SpeakerLoopback".into())
             .spawn(move || {
                 #[cfg(target_os = "windows")]
-                wasapi_loopback_thread(active, buffer, failure);
+                wasapi_loopback_thread(
+                    active,
+                    buffer,
+                    failure,
+                    desired,
+                    reference.clone(),
+                    generation,
+                );
                 #[cfg(target_os = "linux")]
                 pipewire_loopback_thread(active, buffer, failure);
                 #[cfg(target_os = "macos")]
@@ -90,6 +115,7 @@ impl LoopbackCapture {
                     set_failure(&failure, AecFailure::ReferenceLost);
                     active.store(false, Ordering::Relaxed);
                 }
+                clear_reference_generation(&reference, generation);
             });
 
         match spawned {
@@ -108,6 +134,11 @@ impl LoopbackCapture {
 
     pub fn stop(&self) {
         self.active.store(false, Ordering::Relaxed);
+        {
+            let mut reference = lock(&self.reference);
+            reference.ready = false;
+            reference.actual_endpoint_id = None;
+        }
 
         // Give the capture stream a bounded window to release its device. A
         // timed-out handle remains stored, so start() cannot overlap a new
@@ -118,6 +149,27 @@ impl LoopbackCapture {
                 CAPTURE_JOIN_TIMEOUT
             );
         }
+    }
+
+    pub fn reference_state(&self) -> ReferenceState {
+        lock(&self.reference).clone()
+    }
+
+    pub fn start_for_endpoint(&self, endpoint: String) -> Result<(), AecFailure> {
+        let changed = lock(&self.reference).desired_endpoint_id.as_ref() != Some(&endpoint);
+        if changed {
+            self.stop();
+            lock(&self.reference).desired_endpoint_id = Some(endpoint);
+        }
+        self.start()
+    }
+
+    pub fn set_desired_endpoint(&self, endpoint: Option<String>) {
+        lock(&self.reference).desired_endpoint_id = endpoint;
+    }
+
+    pub fn capture_thread_stopped(&self) -> bool {
+        self.join_capture_thread(Duration::ZERO)
     }
 
     fn join_capture_thread(&self, timeout: Duration) -> bool {
@@ -180,6 +232,14 @@ impl LoopbackCapture {
     /// Takes the most recent capture failure so one failed attempt is handled once.
     pub fn take_failure_reason(&self) -> Option<AecFailure> {
         lock(&self.failure).take()
+    }
+}
+
+fn clear_reference_generation(reference: &Mutex<ReferenceState>, generation: u64) {
+    let mut state = lock(reference);
+    if state.generation == generation {
+        state.ready = false;
+        state.actual_endpoint_id = None;
     }
 }
 
@@ -250,21 +310,42 @@ fn wasapi_loopback_thread(
     active: Arc<AtomicBool>,
     buffer: Arc<Mutex<HeapRb<f32>>>,
     failure: Arc<Mutex<Option<AecFailure>>>,
+    desired: Option<String>,
+    reference: Arc<Mutex<ReferenceState>>,
+    generation: u64,
 ) {
-    use std::collections::VecDeque;
     use wasapi::*;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Media::Audio::*,
+            System::Com::{CoCreateInstance, CLSCTX_ALL},
+        },
+    };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        initialize_mta().ok()?;
+        let _apartment = crate::stereo_loopback::Apartment::enter()?;
 
-        let device = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
+        let enumerator = DeviceEnumerator::new()?;
+        let device = if let Some(desired) = desired {
+            enumerator.get_device(&desired)?
+        } else {
+            enumerator.get_default_device(&Direction::Render)?
+        };
+        let actual_id = device.get_id()?;
         let device_name = device.get_friendlyname().unwrap_or_default();
         log::info!("[Loopback] WASAPI: capturing from '{}'", device_name);
 
-        let mut audio_client = device.get_iaudioclient()?;
-        let mix_format = audio_client.get_mixformat()?;
+        let format_client = device.get_iaudioclient()?;
+        let mix_format = format_client.get_mixformat()?;
         let channels = mix_format.get_nchannels() as usize;
         let device_rate = mix_format.get_samplespersec();
+        if channels == 0
+            || mix_format.get_bitspersample() != 32
+            || mix_format.get_subformat()? != SampleType::Float
+        {
+            return Err("unsupported loopback mix format".into());
+        }
 
         log::info!(
             "[Loopback] WASAPI device format: {}Hz {}ch",
@@ -272,20 +353,23 @@ fn wasapi_loopback_thread(
             channels
         );
 
-        let (_def_time, min_time) = audio_client.get_device_period()?;
-
-        // Direction::Capture on a Render device = loopback (auto loopback flag)
-        audio_client.initialize_client(
-            &mix_format,
-            &Direction::Capture,
-            &StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: min_time,
-            },
-        )?;
-
-        let h_event = audio_client.set_get_eventhandle()?;
-        let capture_client = audio_client.get_audiocaptureclient()?;
+        let native_enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+        let id: Vec<u16> = actual_id.encode_utf16().chain(Some(0)).collect();
+        let native_device = unsafe { native_enumerator.GetDevice(PCWSTR(id.as_ptr()))? };
+        let audio_client: IAudioClient = unsafe { native_device.Activate(CLSCTX_ALL, None)? };
+        unsafe {
+            audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                200_000,
+                0,
+                mix_format.as_waveformatex_ref(),
+                None,
+            )?;
+        }
+        let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService()? };
+        let max_frames = unsafe { audio_client.GetBufferSize()? } as usize;
 
         // Create resampler if device is not 48kHz
         let resampler = if device_rate != TARGET_RATE {
@@ -300,26 +384,52 @@ fn wasapi_loopback_thread(
             None
         };
 
-        audio_client.start_stream()?;
+        unsafe {
+            audio_client.Start()?;
+        }
+        {
+            let mut state = lock(&reference);
+            if state.generation != generation || !active.load(Ordering::Relaxed) {
+                unsafe {
+                    audio_client.Stop()?;
+                }
+                return Ok(());
+            }
+            state.actual_endpoint_id = Some(actual_id);
+            state.ready = true;
+        }
         log::info!("[Loopback] WASAPI loopback started");
 
         let bytes_per_frame = mix_format.get_blockalign() as usize;
         let mut total_frames: u64 = 0;
-        let mut endpoint_idle = false;
 
         while active.load(Ordering::Relaxed) {
-            let available = audio_client.get_available_space_in_frames()?;
+            let available = unsafe { capture_client.GetNextPacketSize()? };
             if available == 0 {
-                wait_for_reference_event(&h_event, &mut endpoint_idle)?;
+                std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
-
-            let mut deque: VecDeque<u8> =
-                VecDeque::with_capacity(available as usize * bytes_per_frame);
-            let _flags = capture_client.read_from_device_to_deque(&mut deque)?;
-
-            if !deque.is_empty() {
-                let slice = deque.make_contiguous();
+            let mut ptr = std::ptr::null_mut();
+            let mut frames = 0;
+            let mut flags = 0;
+            unsafe {
+                capture_client.GetBuffer(&mut ptr, &mut frames, &mut flags, None, None)?;
+            }
+            let bytes = unsafe {
+                crate::stereo_loopback::copy_capture_packet(
+                    ptr,
+                    frames as usize,
+                    max_frames,
+                    bytes_per_frame,
+                    flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0,
+                )
+            };
+            unsafe {
+                capture_client.ReleaseBuffer(frames)?;
+            }
+            let bytes = bytes?;
+            if !bytes.is_empty() {
+                let slice = bytes.as_slice();
                 let f32_samples: Vec<f32> = slice
                     .as_chunks::<4>()
                     .0
@@ -332,11 +442,11 @@ fn wasapi_loopback_thread(
                     total_frames += (f32_samples.len() / channels) as u64;
                 }
             }
-
-            wait_for_reference_event(&h_event, &mut endpoint_idle)?;
         }
 
-        audio_client.stop_stream()?;
+        unsafe {
+            audio_client.Stop()?;
+        }
         log::info!(
             "[Loopback] WASAPI loopback stopped, {} frames captured",
             total_frames
@@ -346,44 +456,11 @@ fn wasapi_loopback_thread(
 
     if let Err(e) = result {
         log::error!("[Loopback] WASAPI error: {}", e);
-        set_failure(&failure, AecFailure::ReferenceLost);
+        if active.load(Ordering::Relaxed) {
+            set_failure(&failure, AecFailure::ReferenceLost);
+        }
     }
     active.store(false, Ordering::Relaxed);
-}
-
-/// Wait up to 100 ms for the next WASAPI loopback buffer event.
-///
-/// A loopback capture only receives buffer events while some stream is
-/// rendering to the endpoint. When the speakers go idle, Windows parks the
-/// shared endpoint a few seconds after the last stream stops and the wait
-/// simply times out. That means "no reference data yet", not a lost
-/// reference stream (#329): `LoopbackCapture::read` pads underruns with
-/// silence and playback can resume at any moment, so the capture loop must
-/// stay alive. Genuine device errors (e.g. the default render device being
-/// removed) still surface through the other WASAPI calls in the loop and
-/// tear the thread down as before.
-#[cfg(target_os = "windows")]
-fn wait_for_reference_event(
-    h_event: &wasapi::Handle,
-    endpoint_idle: &mut bool,
-) -> Result<(), wasapi::WasapiError> {
-    match h_event.wait_for_event(100) {
-        Ok(()) => {
-            if *endpoint_idle {
-                log::info!("[Loopback] WASAPI: render activity resumed");
-                *endpoint_idle = false;
-            }
-        }
-        // Idle endpoint: keep looping, the reader pads with silence.
-        Err(wasapi::WasapiError::EventTimeout) => {
-            if !*endpoint_idle {
-                log::info!("[Loopback] WASAPI: endpoint idle, waiting for render activity");
-                *endpoint_idle = true;
-            }
-        }
-        Err(error) => return Err(error),
-    }
-    Ok(())
 }
 
 // ─── Linux: PipeWire capture from the physical playback sink ──────────────
@@ -640,8 +717,7 @@ fn cpal_capture_thread(
         cpal::SampleFormat::I32 => device.build_input_stream(
             config.into(),
             move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                let f32_data: Vec<f32> =
-                    data.iter().map(|&s| s as f32 / 2_147_483_648.0).collect();
+                let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 2_147_483_648.0).collect();
                 push_to_buffer(
                     &f32_data,
                     channels,
@@ -689,6 +765,39 @@ fn cpal_capture_thread(
 mod tests {
     use super::*;
     use ringbuf::traits::Producer;
+
+    #[test]
+    fn stopped_reference_retains_desired_and_discards_actual() {
+        let capture = LoopbackCapture::new();
+        *lock(&capture.reference) = ReferenceState {
+            generation: 2,
+            desired_endpoint_id: Some("desired".into()),
+            actual_endpoint_id: Some("actual".into()),
+            ready: true,
+        };
+        capture.buffer.lock().unwrap().try_push(1.0).unwrap();
+        capture.reset_session();
+        let reference = capture.reference_state();
+        assert_eq!(reference.desired_endpoint_id.as_deref(), Some("desired"));
+        assert!(reference.actual_endpoint_id.is_none());
+        assert!(!reference.ready);
+        assert_eq!(capture.buffer.lock().unwrap().occupied_len(), 0);
+    }
+
+    #[test]
+    fn old_generation_cleanup_does_not_clear_new_reference() {
+        let reference = Mutex::new(ReferenceState {
+            generation: 3,
+            desired_endpoint_id: Some("new".into()),
+            actual_endpoint_id: Some("new".into()),
+            ready: true,
+        });
+        clear_reference_generation(&reference, 2);
+        assert!(lock(&reference).ready);
+        clear_reference_generation(&reference, 3);
+        assert!(!lock(&reference).ready);
+        assert_eq!(lock(&reference).desired_endpoint_id.as_deref(), Some("new"));
+    }
 
     #[test]
     fn capture_failure_is_consumed_once() {
@@ -792,5 +901,24 @@ mod tests {
         release.store(true, Ordering::Relaxed);
         assert!(capture.join_capture_thread(Duration::from_secs(1)));
         assert!(capture.thread.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn changed_target_cannot_start_until_old_thread_exits() {
+        let capture = LoopbackCapture::new();
+        capture.set_desired_endpoint(Some("old".into()));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        *lock(&capture.thread) = Some(std::thread::spawn(move || {
+            let _ = wait.recv();
+        }));
+        let result = capture.start_for_endpoint("new".into());
+        release.send(()).unwrap();
+        assert_eq!(result, Err(AecFailure::ReferenceLost));
+        assert_eq!(capture.reference_state().generation, 0);
+        assert_eq!(
+            capture.reference_state().desired_endpoint_id.as_deref(),
+            Some("new")
+        );
+        assert!(capture.join_capture_thread(Duration::from_secs(1)));
     }
 }

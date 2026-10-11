@@ -1,4 +1,27 @@
 {
+  "routing": {
+    "monitorHint": "Monitoring plays your microphone through the current output. Phone speakers may cause acoustic echo.",
+    "identityError": "The independence of the microphone and computer audio channels cannot be confirmed. Check component identity and choose separate channels.",
+    "microphone": "Phone microphone → computer recording",
+    "microphoneHint": "Choose the ordinary VB-CABLE playback endpoint. In your computer's recording apps, choose CABLE Output.",
+    "chooseOutput": "Choose microphone output",
+    "missingOutput": "Saved output is unavailable — select it again",
+    "outputFailed": "The output could not be opened or confirmed. Refresh and select an available endpoint.",
+    "components": "Two independent audio channels",
+    "detected": "Device detected",
+    "notDetected": "Device not detected",
+    "incomplete": "Components incomplete",
+    "detectFailed": "Could not check component identity. Refresh to retry.",
+    "componentHint": "Ordinary VB-CABLE carries your microphone; Hi-Fi Cable carries computer audio. Detection alone does not verify audio isolation.",
+    "downloadHifi": "Download Hi-Fi Cable from VB-Audio",
+    "setupHint": "Download the two packages separately from VB-Audio. Install manually as administrator and restart when prompted. Set Windows playback to Hi-Fi Cable Input, use the same source in MicYou, and set recording apps to ordinary CABLE Output. Set both Hi-Fi endpoints to 48 kHz. Save and restore your previous defaults if needed.",
+    "aec": {
+      "preparing": "Echo cancellation enabled; preparing a fresh reference.",
+      "monitor_conflict": "Monitoring is on; echo cancellation is paused.",
+      "identity_unavailable": "Echo cancellation enabled but paused: the independence of monitoring and its reference cannot be confirmed.",
+      "capture_failed": "Echo cancellation enabled but paused: its reference is unavailable."
+    }
+  },
   "downlink": {
     "title": "Computer audio → phone",
     "description": "Enable computer audio on your phone. This source is separate from the phone microphone output.",

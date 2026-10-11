@@ -12,11 +12,13 @@ import { usePlugins } from '@/features/plugins/composables/usePlugins';
 import { isAecSupported, useAudioSettings } from '../../composables/useAudioSettings';
 import { useOutputDevices } from '../../composables/useOutputDevices';
 import DspCard from '../DspCard.vue';
+import { useAudioRouting } from '../../composables/useAudioRouting';
 
 const { t, locale } = useI18n();
 const { settings, aecRuntimeAvailable, loadSettings, syncSettingsToBackend } = useAudioSettings();
 const { fetchDevices } = useOutputDevices();
 const { plugins } = usePlugins();
+const { routingStatus } = useAudioRouting();
 
 const showAudioChain = ref(false);
 const nsTypes = [
@@ -171,12 +173,15 @@ onUnmounted(() => {
       v-model="settings.aecEnabled"
       :title="$t('settings.audioParams.aec')"
       :desc="$t('settings.audioParams.aecDesc')"
-      :disabled="!isAecSupported || !aecRuntimeAvailable"
+      :disabled="!isAecSupported"
     >
       <template #hint>
         <p v-if="!isAecSupported" class="text-xs text-on-surface-variant mt-1 flex items-center gap-1">
           <Ban class="w-3 h-3 shrink-0" />
           {{ $t('settings.audioParams.aecUnavailable') }}
+        </p>
+        <p v-else-if="isWindows && settings.aecEnabled && routingStatus && routingStatus.aecState !== 'running' && routingStatus.aecState !== 'disabled'" class="text-xs text-on-surface-variant mt-1" role="status">
+          {{ $t(`routing.aec.${routingStatus.aecState}`) }}
         </p>
         <p v-else-if="!aecRuntimeAvailable" class="text-xs text-on-surface-variant mt-1 flex items-center gap-1">
           <Ban class="w-3 h-3 shrink-0" />

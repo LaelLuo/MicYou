@@ -395,10 +395,10 @@
     <string name="desktop_audio_disconnected">Connecteu primer amb un ordinador</string>
     <string name="desktop_audio_checking">Comprovant la compatibilitat de l’ordinador…</string>
     <string name="desktop_audio_unsupported">Aquest ordinador o versió d’Android no admet la reproducció</string>
-    <string name="desktop_audio_ready">Desactivat · calen auriculars Bluetooth</string>
-    <string name="desktop_audio_connecting">Preparant la reproducció Bluetooth…</string>
-    <string name="desktop_audio_playing">Reproduint amb els auriculars Bluetooth</string>
-    <string name="desktop_audio_bluetooth">Connecteu els auriculars Bluetooth i torneu a activar la reproducció</string>
+    <string name="desktop_audio_ready">Desactivat · segueix la sortida multimèdia del sistema</string>
+    <string name="desktop_audio_connecting">Preparant la reproducció…</string>
+    <string name="desktop_audio_playing">Reproduint per la sortida multimèdia del sistema</string>
+    <string name="desktop_audio_output">Reproducció aturada; comproveu la sortida multimèdia del sistema i torneu-ho a provar</string>
     <string name="desktop_audio_microphone">No es pot confirmar el micròfon del telèfon; reproducció aturada</string>
     <string name="desktop_audio_focus">L’àudio està ocupat; torneu a activar-lo quan estigui disponible</string>
     <string name="desktop_audio_feedback">Trieu una font diferent de la sortida del micròfon</string>

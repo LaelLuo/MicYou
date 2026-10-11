@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n';
 import QRCode from 'qrcode';
 import { analyzeError, generateErrorDetails, type ConnectionErrorDetails } from '../utils/connectionError';
 import { muteSyncEnabled } from './useMuteSync';
-import { isMacOS } from '@/shared/lib/os';
+import { isMacOS, isWindows } from '@/shared/lib/os';
 import { useListeners } from '@/shared/lib/listeners';
 import {
   command,
@@ -27,6 +27,9 @@ const aecFailureNotificationKeys: Record<string, string> = {
   pipewire_unavailable: 'app.notify.aecDisabledPipeWireUnavailable',
   reference_lost: 'app.notify.aecDisabledReferenceLost',
   virtual_source_missing: 'app.notify.aecDisabledVirtualSourceMissing',
+  monitor_conflict: 'routing.aec.monitor_conflict',
+  identity_unavailable: 'routing.aec.identity_unavailable',
+  capture_failed: 'routing.aec.capture_failed',
 };
 
 function aecFailureNotificationKey(reason?: string | null) {
@@ -209,7 +212,7 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
         port,
         mode,
         bindAddress: bindAddressFor(mode),
-        outputDevice: outputDevice.value && outputDevice.value !== 'auto' && outputDevice.value !== 'default'
+        outputDevice: !isWindows && outputDevice.value && outputDevice.value !== 'auto' && outputDevice.value !== 'default'
           ? outputDevice.value
           : null,
       });
@@ -364,7 +367,7 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
           mode: connectionMode.value,
           bindAddress: isAutoBind.value ? '0.0.0.0' : selectedIp.value,
           autoBind: isAutoBind.value,
-          outputDevice: outputDevice.value || '',
+          ...(!isWindows ? { outputDevice: outputDevice.value || '' } : {}),
           muteSync: muteSyncEnabled.value,
         },
       }).catch((e) => console.error('Failed to save server prefs:', e));

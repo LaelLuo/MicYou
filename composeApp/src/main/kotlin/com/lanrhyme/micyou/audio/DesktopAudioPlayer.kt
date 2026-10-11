@@ -1,15 +1,9 @@
 package com.lanrhyme.micyou.audio
 
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.media.AudioAttributes
-import android.media.AudioDeviceCallback
-import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.AudioRouting
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Handler
@@ -22,9 +16,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** 每次请求独占一个实例；真实 PCM 只在蓝牙实际路由确认后写入。 */
+/** 每次请求独占一个实例；MEDIA 输出由 Android 系统选择，普通路由变化不终止会话。 */
 internal class DesktopAudioPlayer(
-    private val context: Context,
+    context: Context,
     private val scope: CoroutineScope,
     private val fail: (String) -> Unit,
     private val metrics: (Int, Long, Long) -> Unit
@@ -36,13 +30,9 @@ internal class DesktopAudioPlayer(
     private val stopped = AtomicBoolean(false)
     private val nativeLock = Any()
     private var track: AudioTrack? = null
-    @Volatile private var outputId = -1
     private var worker: Job? = null
     private var focusRequest: AudioFocusRequest? = null
     private var focusHeld = false
-    private var deviceRegistered = false
-    private var receiverRegistered = false
-    @Volatile private var routeConfirmed = false
     private var underruns = 0L
     private var streamGeneration = 0L
     private var lastMetricsMs = 0L
@@ -51,49 +41,23 @@ internal class DesktopAudioPlayer(
         .setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change != AudioManager.AUDIOFOCUS_GAIN) abort("audio_focus_lost")
-    }
-    private val deviceCallback = object : AudioDeviceCallback() {
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            if (removedDevices.any { it.id == outputId }) abort("bluetooth_disconnected")
-        }
-    }
-    private val routeListener = AudioRouting.OnRoutingChangedListener { routing ->
-        val device = routing.routedDevice
-        if (routeConfirmed && (device?.id != outputId || !isBluetoothMedia(device))) abort("bluetooth_route_changed")
-    }
-    private val noisyReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) abort("bluetooth_disconnected")
-        }
+        if (shouldStopForAudioFocus(change)) abort("audio_focus_lost")
     }
 
     suspend fun prepare() {
         if (Build.VERSION.SDK_INT < 24) throw IllegalStateException("unsupported_android")
-        val output = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull(::isBluetoothMedia)
-            ?: throw IllegalStateException("bluetooth_required")
         synchronized(nativeLock) {
-        if (stopped.get()) throw IllegalStateException("playback_cancelled")
-        outputId = output.id
-        manager.registerAudioDeviceCallback(deviceCallback, handler)
-        deviceRegistered = true
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
-        }
-        receiverRegistered = true
-        val focus = if (Build.VERSION.SDK_INT >= 26) {
-            AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener(focusListener, handler).build().also { focusRequest = it }
-                .let(manager::requestAudioFocus)
-        } else {
-            @Suppress("DEPRECATION")
-            manager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
-        }
-        if (focus != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) throw IllegalStateException("audio_focus_denied")
-        focusHeld = true
+            if (stopped.get()) throw IllegalStateException("playback_cancelled")
+            val focus = if (Build.VERSION.SDK_INT >= 26) {
+                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attributes)
+                    .setOnAudioFocusChangeListener(focusListener, handler).build().also { focusRequest = it }
+                    .let(manager::requestAudioFocus)
+            } else {
+                @Suppress("DEPRECATION")
+                manager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+            }
+            if (focus != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) throw IllegalStateException("audio_focus_denied")
+            focusHeld = true
         }
         val format = android.media.AudioFormat.Builder().setSampleRate(48000)
             .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
@@ -106,27 +70,8 @@ internal class DesktopAudioPlayer(
         synchronized(nativeLock) {
             if (stopped.get()) { local.release(); throw IllegalStateException("playback_cancelled") }
             track = local
-            if (local.state != AudioTrack.STATE_INITIALIZED || !local.setPreferredDevice(output)) {
-                throw IllegalStateException("bluetooth_route_failed")
-            }
-            local.addOnRoutingChangedListener(routeListener, handler)
-            local.play()
+            if (local.state != AudioTrack.STATE_INITIALIZED) throw IllegalStateException("playback_failed")
         }
-        val silence = ByteArray(DOWNLINK_FRAME_BYTES)
-        var confirmed = false
-        for (attempt in 0 until 50) {
-            if (stopped.get()) throw IllegalStateException("playback_cancelled")
-            synchronized(nativeLock) {
-                val routed = local.routedDevice
-                if (routed?.id == outputId && isBluetoothMedia(routed)) confirmed = true
-                if (!confirmed) writeSilence(local, silence)
-            }
-            if (confirmed) break
-            delay(10)
-        }
-        if (!confirmed) throw IllegalStateException("bluetooth_route_failed")
-        // 暂停时 routedDevice 可能为空；保持播放静音，真实 PCM 到达前仍逐次核对路由。
-        synchronized(nativeLock) { routeConfirmed = true }
         worker = scope.launch(Dispatchers.IO) { playbackLoop(local) }
     }
 
@@ -144,8 +89,6 @@ internal class DesktopAudioPlayer(
         var offset = 0
         var emptySince = 0L
         var generation = synchronized(nativeLock) { streamGeneration }
-        var routeWaitSince = 0L
-        val silence = ByteArray(DOWNLINK_FRAME_BYTES)
         try {
             while (scope.isActive && !stopped.get()) {
                 if (queue.consumeFlush()) {
@@ -154,23 +97,7 @@ internal class DesktopAudioPlayer(
                 }
                 if (!primed) {
                     if (queue.size() < DOWNLINK_PREBUFFER_FRAMES) { delay(5); continue }
-                    val routed = synchronized(nativeLock) {
-                        val device = local.routedDevice
-                        if (device?.id == outputId && isBluetoothMedia(device)) {
-                            routeConfirmed = true
-                            true
-                        } else {
-                            writeSilence(local, silence)
-                            false
-                        }
-                    }
-                    if (!routed) {
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        if (routeWaitSince == 0L) routeWaitSince = now
-                        if (now - routeWaitSince >= 500) throw IllegalStateException("bluetooth_route_failed")
-                        delay(5); continue
-                    }
-                    routeWaitSince = 0
+                    synchronized(nativeLock) { if (!stopped.get()) local.play() }
                     primed = true
                 }
                 if (pending == null) { pending = queue.poll(); offset = 0 }
@@ -188,8 +115,6 @@ internal class DesktopAudioPlayer(
                 emptySince = 0
                 val written = synchronized(nativeLock) {
                     if (stopped.get() || generation != streamGeneration) 0 else {
-                        val routed = local.routedDevice
-                        if (routed?.id != outputId || !isBluetoothMedia(routed)) throw IllegalStateException("bluetooth_route_changed")
                         local.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_NON_BLOCKING).also {
                             if (it < 0 || it % 4 != 0) throw IllegalStateException("playback_failed")
                             nativeQueue.recordBytes(it)
@@ -213,14 +138,7 @@ internal class DesktopAudioPlayer(
     }
 
     private fun flushForPrebuffer(local: AudioTrack) {
-        routeConfirmed = false
-        local.pause(); local.flush(); nativeQueue.reset(); local.play()
-    }
-
-    private fun writeSilence(local: AudioTrack, silence: ByteArray) {
-        val written = local.write(silence, 0, silence.size, AudioTrack.WRITE_NON_BLOCKING)
-        if (written < 0 || written % 4 != 0) throw IllegalStateException("playback_failed")
-        nativeQueue.recordBytes(written)
+        local.pause(); local.flush(); nativeQueue.reset()
     }
 
     private fun publishMetrics(nativeMs: Int, pendingBytes: Int = 0) {
@@ -247,13 +165,11 @@ internal class DesktopAudioPlayer(
         queue.clear()
         synchronized(nativeLock) {
             track?.let {
-                try { it.pause(); it.flush(); it.removeOnRoutingChangedListener(routeListener) } catch (_: Exception) { }
+                try { it.pause(); it.flush() } catch (_: Exception) { }
                 it.release()
             }
             track = null
         }
-        if (receiverRegistered) { context.unregisterReceiver(noisyReceiver); receiverRegistered = false }
-        if (deviceRegistered) { manager.unregisterAudioDeviceCallback(deviceCallback); deviceRegistered = false }
         if (focusHeld) {
             if (Build.VERSION.SDK_INT >= 26) focusRequest?.let(manager::abandonAudioFocusRequest)
             else { @Suppress("DEPRECATION") manager.abandonAudioFocus(focusListener) }
@@ -262,6 +178,6 @@ internal class DesktopAudioPlayer(
     }
 }
 
-internal fun isBluetoothMedia(device: AudioDeviceInfo?): Boolean = device != null &&
-    (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-        (Build.VERSION.SDK_INT >= 31 && device.type == AudioDeviceInfo.TYPE_BLE_HEADSET))
+internal fun shouldStopForAudioFocus(change: Int): Boolean =
+    change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
+        change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK

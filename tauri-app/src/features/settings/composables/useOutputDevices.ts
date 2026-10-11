@@ -1,11 +1,9 @@
 import { computed, ref } from 'vue';
 import {
   command,
-  onEvent,
   openUrl,
   type BlackHoleStatus,
   type PipeWireStatus,
-  type UnlistenFn,
 } from '@/platform';
 import { isLinux, isMacOS, isWindows } from '@/shared/lib/os';
 import { useAudioSettings } from './useAudioSettings';
@@ -18,9 +16,6 @@ export const supportedDistros = [
 ];
 
 const audioDevices = ref<string[]>([]);
-const vbcableDetected = ref(false);
-const vbcableInstalling = ref(false);
-const vbcableInstallProgress = ref('');
 const blackholeStatus = ref<BlackHoleStatus>({
   installed: false,
   switch_audio_source: false,
@@ -33,13 +28,6 @@ const pipewireStatus = ref<PipeWireStatus>({
 });
 const selectedDistro = ref('debian');
 
-const hasVBCable = computed(() =>
-  vbcableDetected.value ||
-  audioDevices.value.some((d) => {
-    const lower = d.toLowerCase();
-    return lower.includes('cable') || lower.includes('vb-audio');
-  }),
-);
 const hasBlackHole = computed(() =>
   blackholeStatus.value.installed ||
   audioDevices.value.some((d) => d.toLowerCase().includes('blackhole')),
@@ -50,15 +38,6 @@ const currentPipewireInstallCommand = computed(() => {
   if (match) return match.command;
   return pipewireStatus.value.install_command || 'sudo apt install pipewire pipewire-pulse';
 });
-
-async function checkVBCableStatus() {
-  if (!isWindows) return;
-  try {
-    vbcableDetected.value = await command('check_vbcable');
-  } catch (e) {
-    console.error('Failed to check VB-CABLE status:', e);
-  }
-}
 
 async function checkBlackHoleStatus() {
   if (!isMacOS) return;
@@ -88,31 +67,8 @@ async function fetchDevices() {
   } catch (e) {
     console.error('Failed to fetch audio devices', e);
   }
-  void checkVBCableStatus();
   void checkBlackHoleStatus();
   void checkPipeWireStatus();
-}
-
-async function installVBCable() {
-  vbcableInstalling.value = true;
-  vbcableInstallProgress.value = '';
-  let unlisten: UnlistenFn | null = null;
-  try {
-    unlisten = await onEvent('vbcable-install-progress', (payload) => {
-      vbcableInstallProgress.value = payload;
-    });
-    const result = await command('install_vbcable');
-    if (result.success) {
-      await checkVBCableStatus();
-      audioDevices.value = await command('get_audio_devices');
-    }
-  } catch (e) {
-    console.error('VB-CABLE install failed:', e);
-  } finally {
-    unlisten?.();
-    vbcableInstalling.value = false;
-    vbcableInstallProgress.value = '';
-  }
 }
 
 export function useOutputDevices() {
@@ -121,7 +77,7 @@ export function useOutputDevices() {
   // "auto" routes to the platform's virtual device when one is present.
   const isVirtualDeviceSelected = computed(() => {
     if (!settings.audioDevice || settings.audioDevice === 'auto') {
-      if (isWindows) return hasVBCable.value;
+      if (isWindows) return false;
       if (isMacOS) return hasBlackHole.value;
       if (isLinux) return pipewireStatus.value.available;
       return false;
@@ -139,20 +95,16 @@ export function useOutputDevices() {
 
   return {
     audioDevices,
-    hasVBCable,
     hasBlackHole,
     blackholeStatus,
     pipewireStatus,
     selectedDistro,
     currentPipewireInstallCommand,
-    vbcableInstalling,
-    vbcableInstallProgress,
     isVirtualDeviceSelected,
     isExplicitPhysicalDevice: computed(() => !isAutoSelected.value && !isVirtualDeviceSelected.value),
     isAutoFallbackToPhysical: computed(() => isAutoSelected.value && !isVirtualDeviceSelected.value),
     fetchDevices,
-    installVBCable,
-    openVBCableDownload: () => openUrl('https://vb-audio.com/Cable/'),
-    openBlackHoleDownload: () => openUrl('https://github.com/ExistentialAudio/BlackHole'),
+    openVBCableDownload: () => openUrl('https://vb-audio.com/Cable/index.htm#DownloadCable').catch((e) => console.error('Failed to open VB-CABLE download:', e)),
+    openBlackHoleDownload: () => openUrl('https://github.com/ExistentialAudio/BlackHole').catch((e) => console.error('Failed to open BlackHole download:', e)),
   };
 }
