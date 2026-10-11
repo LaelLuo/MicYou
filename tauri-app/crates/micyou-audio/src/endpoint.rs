@@ -77,11 +77,10 @@ pub fn resolve_endpoint_identity(id: &str) -> Result<OutputEndpoint, String> {
 #[cfg(windows)]
 pub fn default_render_endpoint_id() -> Result<String, String> {
     use wasapi::{DeviceEnumerator, Direction};
-    wasapi::initialize_mta().ok().map_err(|e| e.to_string())?;
+    let _apartment = crate::stereo_loopback::Apartment::query().map_err(|e| e.to_string())?;
     let result = DeviceEnumerator::new()
         .and_then(|e| e.get_default_device(&Direction::Render))
         .and_then(|e| e.get_id());
-    wasapi::deinitialize();
     result.map_err(|e| e.to_string())
 }
 

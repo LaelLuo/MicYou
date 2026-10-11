@@ -366,7 +366,10 @@ impl HostApi for PluginHostApi {
     }
 
     fn set_monitoring(&self, enabled: bool) -> PluginResult<()> {
-        self.host.controls()?.set_monitoring(enabled);
+        self.host
+            .controls()?
+            .set_monitoring(enabled)
+            .map_err(PluginError::Runtime)?;
         Ok(())
     }
 

@@ -49,7 +49,6 @@ pub(super) struct Pipeline {
     pub plugins: Arc<PluginHost>,
     pub events: SharedEvents,
     pub active_audio_session: SharedActiveAudioSession,
-    pub is_monitoring: Arc<AtomicBool>,
     pub spectrum_streaming_enabled: Arc<AtomicBool>,
     pub stats: Arc<NetworkStats>,
     /// Web clients send already-clean browser audio: skip the DSP chain.
@@ -444,7 +443,6 @@ fn run(pipeline: Pipeline) {
         plugins,
         events,
         active_audio_session,
-        is_monitoring,
         spectrum_streaming_enabled,
         stats,
         bypass_dsp,
@@ -491,7 +489,6 @@ fn run(pipeline: Pipeline) {
     let mut decoder = StreamDecoder::default();
     let mut pcm_f32 = Vec::new();
     let mut frame_counter: u32 = 0;
-    let mut monitoring: Option<bool> = None;
 
     // Speaker loopback capture for the AEC far-end reference. Windows uses
     // WASAPI loopback; Linux records the default physical playback sink.
@@ -613,11 +610,6 @@ fn run(pipeline: Pipeline) {
             }
         };
 
-        let monitoring_now = is_monitoring.load(Ordering::Relaxed);
-        if monitoring != Some(monitoring_now) {
-            monitoring = Some(monitoring_now);
-            audio_output.set_monitoring(monitoring_now);
-        }
         match event {
             AudioStreamEvent::SessionStarting { expected, epoch } => {
                 audio_received_for_session = false;

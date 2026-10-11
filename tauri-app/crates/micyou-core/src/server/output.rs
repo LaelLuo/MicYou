@@ -41,7 +41,7 @@ enum AudioOutputCommand {
     Open(Option<String>, usize, Sender<bool>),
     Push(Vec<f32>, usize),
     PushSound(Vec<f32>, f32),
-    SetMonitoring(bool),
+    SetMonitoring(bool, Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -226,8 +226,8 @@ impl AudioOutputHandle {
                         Ok(AudioOutputCommand::PushSound(samples, gain)) => {
                             manager.push_sound_effect(samples, gain);
                         }
-                        Ok(AudioOutputCommand::SetMonitoring(enabled)) => {
-                            manager.set_monitoring(enabled);
+                        Ok(AudioOutputCommand::SetMonitoring(enabled, reply)) => {
+                            let _ = reply.send(manager.set_monitoring(enabled));
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Ok(AudioOutputCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
@@ -282,8 +282,14 @@ impl AudioOutputHandle {
         let _ = self.tx.send(AudioOutputCommand::PushSound(samples, gain));
     }
 
-    pub fn set_monitoring(&self, enabled: bool) {
-        let _ = self.tx.send(AudioOutputCommand::SetMonitoring(enabled));
+    pub fn set_monitoring(&self, enabled: bool) -> Result<(), String> {
+        let (reply, response) = mpsc::channel();
+        self.tx
+            .send(AudioOutputCommand::SetMonitoring(enabled, reply))
+            .map_err(|_| "audio output thread unavailable".to_string())?;
+        response
+            .recv()
+            .map_err(|_| "audio output thread unavailable".to_string())?
     }
 
     /// Milliseconds of audio currently queued in the output ring buffer.

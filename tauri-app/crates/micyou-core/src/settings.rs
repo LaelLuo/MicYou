@@ -100,6 +100,7 @@ pub struct Controls {
     pub(crate) active_connection: SharedActiveConnection,
     pub(crate) plugins: Arc<PluginHost>,
     pub(crate) is_monitoring: Arc<AtomicBool>,
+    pub(crate) monitoring_gate: Arc<std::sync::Mutex<()>>,
     pub(crate) audio_output: Arc<AudioOutputHandle>,
     pub(crate) dsp_settings: Arc<RwLock<AudioDspSettings>>,
 }
@@ -166,12 +167,21 @@ impl Controls {
         self.is_monitoring.load(Ordering::Relaxed)
     }
 
-    pub fn set_monitoring(&self, enabled: bool) {
+    pub fn set_monitoring(&self, enabled: bool) -> Result<(), String> {
+        // 插件事件同步回调可能重入；忙请求失败而不等待，避免锁内自锁。
+        let _operation = match self.monitoring_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err("monitoring update already in progress".into());
+            }
+        };
+        self.audio_output.set_monitoring(enabled)?;
         self.is_monitoring.store(enabled, Ordering::Relaxed);
-        self.audio_output.set_monitoring(enabled);
         self.events.monitoring_state_changed(enabled);
         self.plugins
             .broadcast_event(&PluginEvent::MonitoringChanged { enabled });
+        Ok(())
     }
 
     pub fn dsp_settings(&self) -> AudioDspSettings {
@@ -233,6 +243,7 @@ impl ServerState {
             active_connection: self.active_connection.clone(),
             plugins: self.plugins.clone(),
             is_monitoring: self.is_monitoring.clone(),
+            monitoring_gate: self.monitoring_gate.clone(),
             audio_output: self.audio_output.clone(),
             dsp_settings: self.dsp_settings.clone(),
         }
@@ -314,6 +325,34 @@ mod tests {
     }
 
     struct NoHost;
+
+    #[test]
+    fn concurrent_monitor_command_is_rejected_without_changing_state() {
+        let state = ServerState::new(Arc::new(NoEvents), Arc::new(NoHost), None);
+        let controls = state.controls();
+        let operation = controls.monitoring_gate.lock().unwrap();
+        let concurrent = controls.clone();
+        let error = std::thread::spawn(move || concurrent.set_monitoring(true))
+            .join().unwrap().unwrap_err();
+        assert_eq!(error, "monitoring update already in progress");
+        assert!(!controls.is_monitoring());
+        assert_eq!(controls.set_monitoring(true).unwrap_err(), error, "reentry must not deadlock");
+        drop(operation);
+        controls.set_monitoring(false).unwrap();
+        controls.audio_output.shutdown();
+    }
+
+    #[test]
+    fn failed_monitor_command_does_not_change_desired_state() {
+        let state = ServerState::new(Arc::new(NoEvents), Arc::new(NoHost), None);
+        let controls = state.controls();
+        controls.audio_output.shutdown();
+        assert!(controls.set_monitoring(true).is_err());
+        assert!(!controls.is_monitoring());
+        controls.is_monitoring.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(controls.set_monitoring(false).is_err());
+        assert!(controls.is_monitoring());
+    }
 
     impl HostIntegration for NoHost {
         fn open_url(&self, _: &str) -> Result<(), String> {

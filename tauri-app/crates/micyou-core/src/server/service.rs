@@ -349,7 +349,6 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
         plugins: state.plugins.clone(),
         events: state.events.clone(),
         active_audio_session: state.active_audio_session.clone(),
-        is_monitoring: state.is_monitoring.clone(),
         spectrum_streaming_enabled: state.spectrum_streaming_enabled.clone(),
         stats: state.network_stats.clone(),
         bypass_dsp: mode == ConnectionMode::Web,

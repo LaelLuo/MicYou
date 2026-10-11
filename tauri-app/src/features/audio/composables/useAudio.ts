@@ -18,6 +18,7 @@ export function useAudio() {
   
   // Real-time audio earback / monitoring status (listening to own voice via speaker)
   const isMonitoringEnabled = ref(false);
+  let monitoringPending = false;
   
   // Flag showing/hiding the monitoring panel
   const showMonitoringPanel = ref(false);
@@ -49,12 +50,15 @@ export function useAudio() {
    * Direct execution of monitoring state change
    */
   async function executeSetMonitoring(enabled: boolean) {
-    isMonitoringEnabled.value = enabled;
+    if (monitoringPending) return;
+    monitoringPending = true;
+    // 实际开流成功后由后端事件更新，失败请求不能覆盖其他入口的成功状态。
     try {
       await command('set_monitoring', { enabled });
     } catch (e) {
       console.error('set_monitoring failed:', e);
-      isMonitoringEnabled.value = !enabled;
+    } finally {
+      monitoringPending = false;
     }
   }
 
@@ -62,6 +66,7 @@ export function useAudio() {
    * Toggles real-time audio monitoring / earback with warning prompt on enable
    */
   function toggleMonitoringEnabled() {
+    if (monitoringPending) return;
     if (isMonitoringEnabled.value) {
       void executeSetMonitoring(false);
     } else {

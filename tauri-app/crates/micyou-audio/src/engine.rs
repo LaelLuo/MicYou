@@ -317,16 +317,26 @@ impl AudioOutputManager {
         self.muted.load(Ordering::Relaxed)
     }
 
-    pub fn set_monitoring(&mut self, enabled: bool) {
+    pub fn set_monitoring(&mut self, enabled: bool) -> Result<(), String> {
         if self.is_monitoring == enabled {
-            return;
+            return Ok(());
         }
         self.is_monitoring = enabled;
         if enabled {
             self.start_monitor_loopback();
+            #[cfg(target_os = "linux")]
+            let started = self.pw_loopback_child.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let started = self.monitor_stream.is_some();
+            if !started {
+                self.is_monitoring = false;
+                self.stop_monitor_loopback();
+                return Err("monitor output could not be started".into());
+            }
         } else {
             self.stop_monitor_loopback();
         }
+        Ok(())
     }
 
     fn start_monitor_loopback(&mut self) {

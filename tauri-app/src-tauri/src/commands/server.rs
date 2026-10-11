@@ -48,8 +48,9 @@ pub fn set_mute_state(state: State<'_, ServerState>, is_muted: bool) {
 }
 
 #[tauri::command]
-pub fn set_monitoring(state: State<'_, ServerState>, enabled: bool) {
-    state.controls().set_monitoring(enabled);
+pub async fn set_monitoring(state: State<'_, ServerState>, enabled: bool) -> Result<(), String> {
+    let controls = state.controls();
+    super::blocking(move || controls.set_monitoring(enabled)).await
 }
 
 #[tauri::command]

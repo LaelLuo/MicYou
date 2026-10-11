@@ -13,18 +13,33 @@ pub struct RenderEndpoint {
 }
 
 #[cfg(windows)]
-pub(crate) struct Apartment;
+pub(crate) struct Apartment(bool);
 #[cfg(windows)]
 impl Apartment {
     pub(crate) fn enter() -> Result<Self, windows::core::Error> {
         wasapi::initialize_mta().ok()?;
-        Ok(Self)
+        Ok(Self(true))
+    }
+
+    /// 只读枚举可复用 STA/MTA；采集仍必须通过 enter 建立 MTA。
+    pub(crate) fn query() -> Result<Self, windows::core::Error> {
+        use windows::Win32::Foundation::CO_E_NOTINITIALIZED;
+        use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+        let mut kind = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        match unsafe { CoGetApartmentType(&mut kind, &mut qualifier) } {
+            Ok(()) => Ok(Self(false)),
+            Err(error) if error.code() == CO_E_NOTINITIALIZED => Self::enter(),
+            Err(error) => Err(error),
+        }
     }
 }
 #[cfg(windows)]
 impl Drop for Apartment {
     fn drop(&mut self) {
-        wasapi::deinitialize();
+        if self.0 {
+            wasapi::deinitialize();
+        }
     }
 }
 
@@ -32,7 +47,7 @@ impl Drop for Apartment {
 pub fn list_render_endpoints() -> Result<Vec<RenderEndpoint>, String> {
     use wasapi::*;
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let _apartment = Apartment::enter()?;
+        let _apartment = Apartment::query()?;
         let e = DeviceEnumerator::new()?;
         let default = e.get_default_device(&Direction::Render)?.get_id()?;
         let mut result = Vec::new();
@@ -206,6 +221,31 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn endpoint_queries_preserve_sta_and_mta_ownership() {
+        for initialize in [wasapi::initialize_sta, wasapi::initialize_mta] {
+            std::thread::spawn(move || {
+                initialize().ok().unwrap();
+                assert!(!crate::endpoint::default_render_endpoint_id().unwrap().is_empty());
+                assert!(!list_render_endpoints().unwrap().is_empty());
+                {
+                    let apartment = Apartment::query().unwrap();
+                    assert!(!apartment.0, "must not own the caller's COM initialization");
+                }
+                // guard 释放后仍须保留原 apartment，不能提前 CoUninitialize。
+                let apartment = Apartment::query().unwrap();
+                assert!(!apartment.0);
+                drop(apartment);
+                wasapi::deinitialize();
+                let apartment = Apartment::query().unwrap();
+                assert!(apartment.0, "uninitialized query must own a balanced MTA guard");
+                drop(apartment);
+                assert!(Apartment::query().unwrap().0);
+            }).join().unwrap();
+        }
+    }
+
     #[test]
     fn capture_packets_handle_silence_null_and_device_bounds() {
         let ptr = std::ptr::null();
