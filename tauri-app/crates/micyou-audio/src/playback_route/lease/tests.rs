@@ -1,7 +1,10 @@
 use super::*;
 use std::sync::{Arc, Mutex};
+mod coupling;
 
 struct Fake {
+    linked: bool,
+    partial: bool,
     defaults: [String; 3],
     occupied: bool,
     held: bool,
@@ -27,6 +30,8 @@ struct Fake {
 impl Default for Fake {
     fn default() -> Self {
         Self {
+            linked: false,
+            partial: false,
             defaults: [
                 "speakers".into(),
                 "headphones".into(),
@@ -117,6 +122,7 @@ impl Backend for FakeBackend {
         Ok(fake.defaults[role].clone())
     }
     fn set_render(&mut self, role: usize, endpoint: &str) -> Result<(), String> {
+        let affected = self.write_roles(role);
         let mut fake = self.0.lock().unwrap();
         assert!(fake.held, "never write without cross-process lock");
         assert!(
@@ -125,7 +131,11 @@ impl Backend for FakeBackend {
         );
         fake.actions.push(format!("set:{role}:{endpoint}"));
         #[cfg(windows)]
-        fake.notifications.expected[role].push_back(endpoint.into());
+        for (index, changed) in affected.into_iter().enumerate() {
+            if changed && fake.defaults[index] != endpoint {
+                fake.notifications.expected[index].push_back(endpoint.into());
+            }
+        }
         let fail = fake
             .fail_set
             .as_ref()
@@ -133,20 +143,33 @@ impl Backend for FakeBackend {
         if fail {
             let (_, _, mutate) = fake.fail_set.take().unwrap();
             if mutate {
-                fake.defaults[role] = endpoint.into();
+                for (index, changed) in affected.into_iter().enumerate() {
+                    if changed && (!fake.partial || index == 1) {
+                        fake.defaults[index] = endpoint.into();
+                    }
+                }
             }
             #[cfg(windows)]
             {
-                fake.notifications.failed_write(role, endpoint, mutate);
-                if mutate {
-                    fake.late_notifications.push((role, endpoint.into()));
+                for (index, changed) in affected.into_iter().enumerate() {
+                    if changed {
+                        let installed = fake.defaults[index] == endpoint;
+                        fake.notifications.failed_write(index, endpoint, installed);
+                        if installed {
+                            fake.late_notifications.push((index, endpoint.into()));
+                        }
+                    }
                 }
             }
             return Err("fake setter failure".into());
         }
-        fake.defaults[role] = endpoint.into();
-        #[cfg(windows)]
-        fake.late_notifications.push((role, endpoint.into()));
+        for (index, changed) in affected.into_iter().enumerate() {
+            if changed && fake.defaults[index] != endpoint {
+                fake.defaults[index] = endpoint.into();
+                #[cfg(windows)]
+                fake.late_notifications.push((index, endpoint.into()));
+            }
+        }
         if fake
             .fail_read_after_set
             .as_ref()
@@ -156,6 +179,13 @@ impl Backend for FakeBackend {
             fake.next_read_error = Some(role);
         }
         Ok(())
+    }
+    fn write_roles(&self, role: usize) -> [bool; 3] {
+        if self.0.lock().unwrap().linked && role < 2 {
+            [true, true, false]
+        } else {
+            std::array::from_fn(|index| index == role)
+        }
     }
     fn external_changes(&mut self) -> [bool; 3] {
         let mut fake = self.0.lock().unwrap();

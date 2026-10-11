@@ -427,3 +427,21 @@ async fn changing_source_releases_before_persisting_the_new_binding() {
         .await;
     assert!(controller.status().error.is_none());
 }
+
+#[tokio::test]
+async fn routing_actor_failure_stops_and_releases_without_claiming_external_change() {
+    let (controller, lease, mut rx) = attached(true).await;
+    controller.worker_ready(1, 1, "hifi".into()).await;
+    while rx.try_recv().is_ok() {}
+    controller
+        .finish_worker(1, 1, Some("route_unavailable".into()))
+        .await;
+    let message = rx.recv().await.unwrap().downlink_state.unwrap();
+    assert!(!message.active);
+    assert_eq!(message.error, "route_unavailable");
+    assert_eq!(message.route_state, "restored");
+    assert_eq!(
+        *lease.calls.lock().unwrap(),
+        vec!["acquire:hifi", "release"]
+    );
+}

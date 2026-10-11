@@ -26,14 +26,29 @@ impl RouteLease for PlaybackRouteController {
         self.external_change()
     }
     fn external_error(&self) -> String {
-        if self.status().error.as_deref() == Some("route_device_unavailable") {
-            "source_unavailable".into()
-        } else {
-            "route_changed_external".into()
-        }
+        external_error_for_outcome(&self.status()).into()
     }
     fn recover_stale(&self) -> RouteOutcome {
         self.recover_stale()
+    }
+}
+
+fn external_error_for_outcome(outcome: &RouteOutcome) -> &'static str {
+    // actor通道失败也会触发停止，但它不是用户修改默认输出。
+    if outcome.error.as_deref() == Some("route_device_unavailable") {
+        "source_unavailable"
+    } else if outcome.state == RouteState::RestoreFailed {
+        if outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("route_restore_failed"))
+        {
+            "route_restore_failed"
+        } else {
+            "route_unavailable"
+        }
+    } else {
+        "route_changed_external"
     }
 }
 
@@ -178,6 +193,35 @@ impl DownlinkController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_failure_is_not_reported_as_a_manual_default_change() {
+        let outcome = RouteOutcome {
+            state: RouteState::RestoreFailed,
+            error: Some("routing actor unavailable".into()),
+        };
+        assert_eq!(external_error_for_outcome(&outcome), "route_unavailable");
+        let outcome = RouteOutcome {
+            state: RouteState::RestoreFailed,
+            error: Some("route_restore_failed: journal write failed".into()),
+        };
+        assert_eq!(external_error_for_outcome(&outcome), "route_restore_failed");
+    }
+
+    #[test]
+    fn genuine_external_change_and_missing_device_keep_distinct_causes() {
+        let mut outcome = RouteOutcome {
+            state: RouteState::Held,
+            error: None,
+        };
+        assert_eq!(
+            external_error_for_outcome(&outcome),
+            "route_changed_external"
+        );
+        outcome.error = Some("route_device_unavailable".into());
+        assert_eq!(external_error_for_outcome(&outcome), "source_unavailable");
+    }
+
     #[test]
     fn unavailable_routing_does_not_report_a_failed_lease_to_manual_downlink() {
         let lease = UnavailableLease(Some("COM initialization failed".into()));

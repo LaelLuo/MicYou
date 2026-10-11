@@ -229,6 +229,8 @@ impl DownlinkController {
                 | "identity_unavailable"
                 | "route_changed_external"
                 | "route_source_required"
+                | "route_unavailable"
+                | "route_restore_failed"
                 | "transport_stalled" => error,
                 _ => "capture_failed".into(),
             });

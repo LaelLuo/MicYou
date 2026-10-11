@@ -1,5 +1,6 @@
 use super::{RouteOutcome, RouteState};
 use serde::{Deserialize, Serialize};
+mod restoration;
 #[cfg(test)]
 mod tests;
 
@@ -34,6 +35,9 @@ pub(super) trait Backend {
     fn defaults(&self) -> Result<[String; 3], String>;
     fn default_render(&self, role: usize) -> Result<String, String>;
     fn set_render(&mut self, role: usize, endpoint: &str) -> Result<(), String>;
+    fn write_roles(&self, role: usize) -> [bool; 3] {
+        std::array::from_fn(|index| index == role)
+    }
     fn external_changes(&mut self) -> [bool; 3];
     fn invalidated_endpoints(&mut self) -> Vec<String>;
     fn reset_notifications(&mut self);
@@ -176,6 +180,17 @@ impl<B: Backend, J: Journal> LeaseMachine<B, J> {
                 return Err(error);
             }
         };
+        for role in 0..3 {
+            let affected = self.backend.write_roles(role);
+            if original
+                .iter()
+                .enumerate()
+                .any(|(index, id)| affected[index] && !id.eq_ignore_ascii_case(&original[role]))
+            {
+                self.unlock();
+                return Err("route_restore_target_required: linked console/media defaults differ and cannot be independently restored".into());
+            }
+        }
         if original.iter().any(|id| id.eq_ignore_ascii_case(target)) {
             self.unlock();
             return Err("route_restore_target_required: select a normal playback device before automatic routing".into());
@@ -218,26 +233,48 @@ impl<B: Backend, J: Journal> LeaseMachine<B, J> {
         if self.observe_external()? {
             return Err("computer playback device changed externally".into());
         }
-        if !self
-            .backend
-            .default_render(role)?
-            .eq_ignore_ascii_case(&self.record.as_ref().unwrap().roles[role].original)
-        {
-            self.record.as_mut().unwrap().roles[role].owned = false;
-            self.released_external = true;
-            self.journal.save(self.record.as_ref().unwrap())?;
-            return Err("computer playback device changed externally".into());
+        let affected = self.backend.write_roles(role);
+        let mut already_installed = true;
+        for (index, changed) in affected.into_iter().enumerate() {
+            if !changed {
+                continue;
+            }
+            let actual = self.backend.default_render(index)?;
+            let entry = &self.record.as_ref().unwrap().roles[index];
+            let installed = entry.touched && entry.owned && actual.eq_ignore_ascii_case(target);
+            already_installed &= installed;
+            if !installed && (!entry.owned || !actual.eq_ignore_ascii_case(&entry.original)) {
+                for (entry, changed) in self.record.as_mut().unwrap().roles.iter_mut().zip(affected)
+                {
+                    if changed {
+                        entry.owned = false;
+                    }
+                }
+                self.released_external = true;
+                self.journal.save(self.record.as_ref().unwrap())?;
+                return Err("computer playback device changed externally".into());
+            }
+        }
+        if already_installed {
+            return Ok(());
         }
         let record = self.record.as_mut().unwrap();
-        record.roles[role].touched = true;
+        for (entry, affected) in record.roles.iter_mut().zip(self.backend.write_roles(role)) {
+            if affected {
+                entry.touched = true;
+            }
+        }
         self.journal.save(record)?;
         self.backend.set_render(role, target)?;
-        if !self
-            .backend
-            .default_render(role)?
-            .eq_ignore_ascii_case(target)
-        {
-            return Err(format!("render role {role} switch verification failed"));
+        for (index, changed) in affected.into_iter().enumerate() {
+            if changed
+                && !self
+                    .backend
+                    .default_render(index)?
+                    .eq_ignore_ascii_case(target)
+            {
+                return Err(format!("render role {index} switch verification failed"));
+            }
         }
         if self.observe_external()? {
             return Err("computer playback device changed externally".into());
@@ -259,7 +296,15 @@ impl<B: Backend, J: Journal> LeaseMachine<B, J> {
                 })
         });
         let mut changed = false;
-        for (role, external) in record.roles.iter_mut().zip(changes) {
+        let mut expanded = [false; 3];
+        for (role, changed) in changes.into_iter().enumerate() {
+            if changed {
+                for (slot, affected) in expanded.iter_mut().zip(self.backend.write_roles(role)) {
+                    *slot |= affected;
+                }
+            }
+        }
+        for (role, external) in record.roles.iter_mut().zip(expanded) {
             if external && role.owned {
                 role.owned = false;
                 changed = true;
@@ -307,80 +352,6 @@ impl<B: Backend, J: Journal> LeaseMachine<B, J> {
     }
 
     fn restore(&mut self, external: bool) -> RouteOutcome {
-        if let Err(error) = self.observe_external() {
-            return self.failed(error);
-        }
-        let external = external || self.released_external;
-        let Some(mut record) = self.record.take() else {
-            return self.outcome.clone();
-        };
-        record.phase = "restoring".into();
-        if let Err(error) = self.journal.save(&record) {
-            self.record = Some(record);
-            return self.failed(error);
-        }
-        let mut failures = Vec::new();
-        for role in 0..3 {
-            let changes = self.backend.external_changes();
-            for (entry, changed) in record.roles.iter_mut().zip(changes) {
-                if changed {
-                    entry.owned = false;
-                }
-            }
-            if let Err(error) = self.journal.save(&record) {
-                failures.push(error);
-                break;
-            }
-            let entry = &mut record.roles[role];
-            if !entry.touched || !entry.owned {
-                continue;
-            }
-            match self.backend.default_render(role) {
-                Ok(current) if current.eq_ignore_ascii_case(&entry.installed) => {
-                    match self
-                        .backend
-                        .set_render(role, &entry.original)
-                        .and_then(|_| self.backend.default_render(role))
-                    {
-                        Ok(current) if current.eq_ignore_ascii_case(&entry.original) => {
-                            entry.touched = false
-                        }
-                        Ok(_) => {
-                            failures.push(format!("render role {role} restore verification failed"))
-                        }
-                        Err(error) => {
-                            failures.push(format!("render role {role} restore failed: {error}"))
-                        }
-                    }
-                }
-                Ok(_) => entry.owned = false,
-                Err(error) => failures.push(error),
-            }
-            if let Err(error) = self.journal.save(&record) {
-                failures.push(error);
-                break;
-            }
-        }
-        if failures.is_empty() {
-            if let Err(error) = self.journal.remove() {
-                self.record = Some(record);
-                return self.failed(error);
-            }
-            self.unlock();
-            self.outcome = RouteOutcome::new(
-                if external {
-                    RouteState::ReleasedExternal
-                } else {
-                    RouteState::Restored
-                },
-                None,
-            );
-            self.outcome.clone()
-        } else {
-            record.phase = "restore_failed".into();
-            let _ = self.journal.save(&record);
-            self.record = Some(record);
-            self.failed(failures.join("; "))
-        }
+        self.restore_transaction(external)
     }
 }

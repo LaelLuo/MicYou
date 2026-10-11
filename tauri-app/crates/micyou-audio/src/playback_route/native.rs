@@ -61,7 +61,9 @@ impl Notifications {
             .is_some_and(|id| id.eq_ignore_ascii_case(&endpoint))
         {
             self.expected[role].pop_front();
+            log::info!("[Routing] notification role={role} endpoint={endpoint} classification=own");
         } else {
+            log::warn!("[Routing] notification role={role} endpoint={endpoint} classification=external expected={:?}", self.expected[role]);
             self.external[role] = true;
             self.expected[role].clear();
         }
@@ -309,11 +311,22 @@ impl Backend for NativeBackend {
         if unsafe { identity.GetDataFlow() }.map_err(|error| error.to_string())? != eRender {
             return Err("capture endpoints cannot be written by playback routing".into());
         }
-        self.notifications
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .expected[role]
-            .push_back(endpoint.into());
+        let affected = self.write_roles(role);
+        let mut before = [None, None, None];
+        for (index, changed) in affected.into_iter().enumerate() {
+            if changed {
+                before[index] = Some(self.default_render(index)?);
+            }
+        }
+        {
+            let mut notifications = self.notifications.lock().unwrap_or_else(|p| p.into_inner());
+            for (index, changed) in affected.into_iter().enumerate() {
+                if changed && !before[index].as_deref().is_some_and(|id| id.eq_ignore_ascii_case(endpoint)) {
+                    notifications.expected[index].push_back(endpoint.into());
+                }
+            }
+        }
+        log::info!("[Routing] setter role={role} affected={affected:?} before={before:?} target={endpoint}");
         let result = unsafe {
             (self.policy.vtable().set_default_endpoint)(
                 self.policy.as_raw(),
@@ -322,16 +335,31 @@ impl Backend for NativeBackend {
             )
         }
         .ok();
+        log::info!(
+            "[Routing] setter role={role} target={endpoint} result={result:?} after={:?}",
+            self.defaults()
+        );
         if result.is_err() {
             // 失败 HRESULT 不等于没有写入；回读已安装目标时仍须消费晚到的自身通知。
-            if let Ok(actual) = self.default_render(role) {
-                self.notifications
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .failed_write(role, endpoint, actual.eq_ignore_ascii_case(endpoint));
+            for (index, changed) in affected.into_iter().enumerate() {
+                if changed {
+                    if let Ok(actual) = self.default_render(index) {
+                        self.notifications
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .failed_write(index, endpoint, actual.eq_ignore_ascii_case(endpoint));
+                    }
+                }
             }
         }
         result.map_err(|error| error.to_string())
+    }
+    fn write_roles(&self, role: usize) -> [bool; 3] {
+        match role {
+            0 | 1 => [true, true, false],
+            2 => [false, false, true],
+            _ => [false; 3],
+        }
     }
     fn external_changes(&mut self) -> [bool; 3] {
         let mut state = self.notifications.lock().unwrap_or_else(|p| p.into_inner());
