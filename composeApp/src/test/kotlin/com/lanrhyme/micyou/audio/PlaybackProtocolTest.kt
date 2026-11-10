@@ -12,50 +12,41 @@ import org.junit.Test
 
 @OptIn(ExperimentalSerializationApi::class)
 class PlaybackProtocolTest {
-    @Serializable private data class LegacyConnect(
+    @Serializable private data class OfficialConnect(
         @ProtoNumber(1) val sessionId: Long = 0,
-        @ProtoNumber(2) val supportsDownlink: Boolean = false
-    )
-    @Serializable private data class LegacyRequest(
-        @ProtoNumber(1) val sessionId: Long = 0,
-        @ProtoNumber(2) val requestId: Long = 0,
-        @ProtoNumber(3) val enabled: Boolean = false
-    )
-    @Serializable private data class LegacyState(
-        @ProtoNumber(1) val sessionId: Long = 0,
-        @ProtoNumber(2) val requestId: Long = 0,
-        @ProtoNumber(3) val streamId: Long = 0,
-        @ProtoNumber(4) val supported: Boolean = false,
-        @ProtoNumber(5) val active: Boolean = false
+        @ProtoNumber(2) val platform: String = ""
     )
 
-    @Test fun `old peers keep existing fields and never advertise automatic routing`() {
-        val old = ProtoBuf.encodeToByteArray(LegacyConnect.serializer(), LegacyConnect(42, true))
-        val current = ProtoBuf.decodeFromByteArray(ConnectMessage.serializer(), old)
-        assertTrue(current.supportsDownlink)
+    @Test fun `official platform stays on field 2 and is not a downlink capability`() {
+        val official = ProtoBuf.encodeToByteArray(OfficialConnect.serializer(), OfficialConnect(42, "android"))
+        val current = ProtoBuf.decodeFromByteArray(ConnectMessage.serializer(), official)
+        assertEquals(42L, current.sessionId)
+        assertEquals("android", current.platform)
+        assertFalse(current.supportsDownlink)
         assertFalse(current.supportsPlaybackRouting)
-        val new = ProtoBuf.encodeToByteArray(ConnectMessage.serializer(), ConnectMessage(42, true, true))
-        assertEquals(LegacyConnect(42, true), ProtoBuf.decodeFromByteArray(LegacyConnect.serializer(), new))
-        val oldState = ProtoBuf.encodeToByteArray(LegacyState.serializer(), LegacyState(42, 1, 2, true, true))
-        val state = ProtoBuf.decodeFromByteArray(DownlinkStateMessage.serializer(), oldState)
-        assertFalse(state.supportsPlaybackRouting)
-        assertEquals("", state.routeState)
-        assertEquals("", state.routeError)
+
+        val duplex = ProtoBuf.encodeToByteArray(
+            ConnectMessage.serializer(),
+            ConnectMessage(42, platform = "android", supportsDownlink = true, supportsPlaybackRouting = true)
+        )
+        assertEquals(OfficialConnect(42, "android"), ProtoBuf.decodeFromByteArray(OfficialConnect.serializer(), duplex))
     }
 
-    @Test fun `failure stop remains stop to old peers while new peers receive failure cause`() {
+    @Test fun `failure stop still encodes enabled false and carries the failure cause`() {
         val failed = DownlinkRequestMessage(42, 3, false, "playback_failed")
         val wire = ProtoBuf.encodeToByteArray(DownlinkRequestMessage.serializer(), failed)
-        assertEquals(LegacyRequest(42, 3, false), ProtoBuf.decodeFromByteArray(LegacyRequest.serializer(), wire))
         assertEquals(failed, ProtoBuf.decodeFromByteArray(DownlinkRequestMessage.serializer(), wire))
+        assertFalse(failed.enabled)
+        assertEquals("playback_failed", failed.playbackError)
     }
 
-    @Test fun `actual restore results carry generation and do not alter old active fields`() {
+    @Test fun `restore results carry routing fields without changing inactive state`() {
         val result = DownlinkStateMessage(sessionId = 42, requestId = 3, streamId = 2, supported = true,
             supportsPlaybackRouting = true, routeState = "restore_failed", routeError = "endpoint_missing")
         val wire = ProtoBuf.encodeToByteArray(DownlinkStateMessage.serializer(), result)
-        val old = ProtoBuf.decodeFromByteArray(LegacyState.serializer(), wire)
-        assertEquals(LegacyState(42, 3, 2, true, false), old)
-        assertEquals(result, ProtoBuf.decodeFromByteArray(DownlinkStateMessage.serializer(), wire))
+        val decoded = ProtoBuf.decodeFromByteArray(DownlinkStateMessage.serializer(), wire)
+        assertEquals(result, decoded)
+        assertFalse(decoded.active)
+        assertEquals("restore_failed", decoded.routeState)
     }
 }

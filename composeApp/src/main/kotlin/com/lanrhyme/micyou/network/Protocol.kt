@@ -102,13 +102,12 @@ data class MuteMessage(
 data class ConnectMessage(
     @ProtoNumber(1)
     val sessionId: Long = 0,
+    // Official field 2 matches upstream/master. Duplex flags start at 1000.
     @ProtoNumber(2)
+    val platform: String = "",
+    @ProtoNumber(1000)
     val supportsDownlink: Boolean = false,
-    @ProtoNumber(3) val supportsPlaybackRouting: Boolean = false,
-    // Remapped from upstream field 2 so existing Duplex 2.1.2 phones keep
-    // supportsDownlink on field 2. Official clients send platform at field 2.
-    @ProtoNumber(4)
-    val platform: String = ""
+    @ProtoNumber(1001) val supportsPlaybackRouting: Boolean = false
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -289,13 +288,13 @@ data class MessageWrapper(
     // proto3 skips unknown fields, so legacy desktops simply ignore it.
     @ProtoNumber(7)
     val pluginMessage: PluginMessage? = null,
+    // Official field 8 matches upstream/master. Duplex downlink starts at 1000.
     @ProtoNumber(8)
+    val stats: StatsMessage? = null,
+    @ProtoNumber(1000)
     val downlinkRequest: DownlinkRequestMessage? = null,
-    @ProtoNumber(9)
+    @ProtoNumber(1001)
     val downlinkState: DownlinkStateMessage? = null,
-    @ProtoNumber(10)
-    val downlinkAudio: DownlinkAudioMessage? = null,
-    // Remapped from upstream field 8; official clients send stats at field 8.
-    @ProtoNumber(11)
-    val stats: StatsMessage? = null
+    @ProtoNumber(1002)
+    val downlinkAudio: DownlinkAudioMessage? = null
 )

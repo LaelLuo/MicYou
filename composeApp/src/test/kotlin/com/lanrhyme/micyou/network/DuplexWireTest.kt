@@ -20,8 +20,8 @@ class DuplexWireTest {
     private fun decode(name: String): MessageWrapper = ProtoBuf.decodeFromByteArray(MessageWrapper.serializer(), wire(name))
 
     @Test fun `shared Rust fixtures decode and encode exact protobuf bytes`() {
-        assertEquals(ConnectMessage(42, false), decode("legacyConnect").connect)
-        assertEquals(ConnectMessage(42, true), decode("duplexConnect").connect)
+        assertEquals(ConnectMessage(42), decode("legacyConnect").connect)
+        assertEquals(ConnectMessage(42, supportsDownlink = true), decode("duplexConnect").connect)
         assertEquals(DownlinkRequestMessage(42, 1, true), decode("enableRequest").downlinkRequest)
         assertTrue(decode("enableRequest").hasControlMessage())
         val state = decode("activeState").downlinkState!!
@@ -35,13 +35,45 @@ class DuplexWireTest {
             ProtoBuf.encodeToByteArray(MessageWrapper.serializer(), decode(name)))
     }
 
-    @Test fun `legacy schema ignores capability flag from new phone`() {
-        val old = ProtoBuf.decodeFromByteArray(LegacyWrapper.serializer(), wire("duplexConnect"))
-        assertEquals(42L, old.connect!!.sessionId)
+    @Test fun `official connect keeps session and platform and ignores duplex flags`() {
+        val official = OfficialWrapper(
+            connect = OfficialConnect(sessionId = 42, platform = "android")
+        )
+        val bytes = ProtoBuf.encodeToByteArray(OfficialWrapper.serializer(), official)
+        val current = ProtoBuf.decodeFromByteArray(MessageWrapper.serializer(), bytes).connect!!
+        assertEquals(42L, current.sessionId)
+        assertEquals("android", current.platform)
+        assertFalse(current.supportsDownlink)
+        assertFalse(current.supportsPlaybackRouting)
+
+        val duplex = MessageWrapper(
+            connect = ConnectMessage(42, platform = "android", supportsDownlink = true, supportsPlaybackRouting = true)
+        )
+        val duplexBytes = ProtoBuf.encodeToByteArray(MessageWrapper.serializer(), duplex)
+        val seen = ProtoBuf.decodeFromByteArray(OfficialWrapper.serializer(), duplexBytes).connect!!
+        assertEquals(42L, seen.sessionId)
+        assertEquals("android", seen.platform)
+    }
+
+    @Test fun `official stats occupies field 8 and is not a downlink request`() {
+        val official = OfficialWrapper(stats = OfficialStats(rttMs = 12, jitterMs = 1.5f, packetLoss = 0.25f, latencyMs = 40))
+        val bytes = ProtoBuf.encodeToByteArray(OfficialWrapper.serializer(), official)
+        val current = ProtoBuf.decodeFromByteArray(MessageWrapper.serializer(), bytes)
+        assertEquals(StatsMessage(12, 1.5f, 0.25f, 40), current.stats)
+        assertNull(current.downlinkRequest)
+        assertNull(current.downlinkState)
+        assertNull(current.downlinkAudio)
+
+        val downlink = decode("enableRequest")
+        val officialView = ProtoBuf.decodeFromByteArray(OfficialWrapper.serializer(), wire("enableRequest"))
+        assertNull(officialView.stats)
+        assertNotNull(downlink.downlinkRequest)
     }
 
     @Test fun `shared routing fixtures preserve capability failure stop and actual restore result`() {
-        val connect = MessageWrapper(connect = ConnectMessage(42, supportsDownlink = true, supportsPlaybackRouting = true))
+        val connect = MessageWrapper(
+            connect = ConnectMessage(42, supportsDownlink = true, supportsPlaybackRouting = true)
+        )
         val request = MessageWrapper(downlinkRequest = DownlinkRequestMessage(42, 3, false, "playback_failed"))
         val state = MessageWrapper(downlinkState = DownlinkStateMessage(
             sessionId = 42, requestId = 3, streamId = 2, supported = true, active = false,
@@ -53,59 +85,22 @@ class DuplexWireTest {
             assertArrayEquals(name, wire(name), ProtoBuf.encodeToByteArray(MessageWrapper.serializer(), expected))
         }
     }
-
-    @Test fun `pre routing schema ignores new fields but keeps stop and inactive semantics`() {
-        val connect = ProtoBuf.decodeFromByteArray(PreRoutingWrapper.serializer(), wire("routingConnect")).connect!!
-        assertEquals(42L, connect.sessionId)
-        assertTrue(connect.supportsDownlink)
-        val stop = ProtoBuf.decodeFromByteArray(PreRoutingWrapper.serializer(), wire("playbackErrorRequest")).downlinkRequest!!
-        assertEquals(42L, stop.sessionId)
-        assertEquals(3L, stop.requestId)
-        assertFalse(stop.enabled)
-        val state = ProtoBuf.decodeFromByteArray(PreRoutingWrapper.serializer(), wire("routingFailedState")).downlinkState!!
-        assertEquals(42L, state.sessionId)
-        assertEquals(3L, state.requestId)
-        assertEquals(2L, state.streamId)
-        assertTrue(state.supported)
-        assertFalse(state.active)
-        assertEquals("playback_failed", state.error)
-        assertEquals(48000, state.sampleRate)
-        assertEquals(2, state.channelCount)
-        assertEquals(2, state.audioFormat)
-    }
 }
 
 @OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class LegacyConnect(@ProtoNumber(1) val sessionId: Long = 0)
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class LegacyWrapper(@ProtoNumber(2) val connect: LegacyConnect? = null)
-
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class PreRoutingConnect(
+@Serializable private data class OfficialConnect(
     @ProtoNumber(1) val sessionId: Long = 0,
-    @ProtoNumber(2) val supportsDownlink: Boolean = false
+    @ProtoNumber(2) val platform: String = ""
 )
 @OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class PreRoutingRequest(
-    @ProtoNumber(1) val sessionId: Long = 0,
-    @ProtoNumber(2) val requestId: Long = 0,
-    @ProtoNumber(3) val enabled: Boolean = false
+@Serializable private data class OfficialStats(
+    @ProtoNumber(1) val rttMs: Int = 0,
+    @ProtoNumber(2) val jitterMs: Float = 0f,
+    @ProtoNumber(3) val packetLoss: Float = 0f,
+    @ProtoNumber(4) val latencyMs: Int = 0
 )
 @OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class PreRoutingState(
-    @ProtoNumber(1) val sessionId: Long = 0,
-    @ProtoNumber(2) val requestId: Long = 0,
-    @ProtoNumber(3) val streamId: Long = 0,
-    @ProtoNumber(4) val supported: Boolean = false,
-    @ProtoNumber(5) val active: Boolean = false,
-    @ProtoNumber(6) val error: String = "",
-    @ProtoNumber(7) val sampleRate: Int = 0,
-    @ProtoNumber(8) val channelCount: Int = 0,
-    @ProtoNumber(9) val audioFormat: Int = 0
-)
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable private data class PreRoutingWrapper(
-    @ProtoNumber(2) val connect: PreRoutingConnect? = null,
-    @ProtoNumber(8) val downlinkRequest: PreRoutingRequest? = null,
-    @ProtoNumber(9) val downlinkState: PreRoutingState? = null
+@Serializable private data class OfficialWrapper(
+    @ProtoNumber(2) val connect: OfficialConnect? = null,
+    @ProtoNumber(8) val stats: OfficialStats? = null
 )

@@ -53,63 +53,114 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct LegacyConnect {
+    struct OfficialConnect {
         #[prost(int64, tag = "1")]
         session_id: i64,
+        #[prost(string, tag = "2")]
+        platform: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct LegacyWrapper {
+    struct OfficialStats {
+        #[prost(int32, tag = "1")]
+        rtt_ms: i32,
+        #[prost(float, tag = "2")]
+        jitter_ms: f32,
+        #[prost(float, tag = "3")]
+        packet_loss: f32,
+        #[prost(int32, tag = "4")]
+        latency_ms: i32,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct OfficialWrapper {
         #[prost(message, optional, tag = "2")]
-        connect: Option<LegacyConnect>,
+        connect: Option<OfficialConnect>,
         #[prost(message, optional, tag = "8")]
-        request: Option<LegacyRequest>,
-        #[prost(message, optional, tag = "9")]
-        state: Option<LegacyState>,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    struct LegacyRequest {
-        #[prost(int64, tag = "1")]
-        session_id: i64,
-        #[prost(int64, tag = "2")]
-        request_id: i64,
-        #[prost(bool, tag = "3")]
-        enabled: bool,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    struct LegacyState {
-        #[prost(int64, tag = "1")]
-        session_id: i64,
-        #[prost(int64, tag = "2")]
-        request_id: i64,
-        #[prost(int64, tag = "3")]
-        stream_id: i64,
-        #[prost(bool, tag = "4")]
-        supported: bool,
-        #[prost(bool, tag = "5")]
-        active: bool,
-        #[prost(string, tag = "6")]
-        error: String,
+        stats: Option<OfficialStats>,
     }
 
     #[test]
-    fn old_and_new_connect_decode_without_changing_legacy_session() {
+    fn connect_fixtures_roundtrip_and_official_schema_keeps_session() {
         let old = MessageWrapper::decode(fixture("legacyConnect").as_slice()).unwrap();
         assert_eq!(old.connect.as_ref().unwrap().session_id, 42);
-        assert!(!old.connect.unwrap().supports_downlink);
+        assert!(!old.connect.as_ref().unwrap().supports_downlink);
         let new_bytes = fixture("duplexConnect");
         let new = MessageWrapper::decode(new_bytes.as_slice()).unwrap();
         assert!(new.connect.as_ref().unwrap().supports_downlink);
         assert_eq!(new.encode_to_vec(), new_bytes);
-        let legacy = LegacyWrapper::decode(new_bytes.as_slice()).unwrap();
-        assert_eq!(legacy.connect.unwrap().session_id, 42);
-        // Unknown top-level tags also remain safely skippable by an old peer.
-        assert!(LegacyWrapper::decode(fixture("activeState").as_slice())
+        let official = OfficialWrapper::decode(new_bytes.as_slice()).unwrap();
+        assert_eq!(official.connect.unwrap().session_id, 42);
+        assert!(OfficialWrapper::decode(fixture("activeState").as_slice())
             .unwrap()
             .connect
             .is_none());
+    }
+
+    #[test]
+    fn official_platform_is_not_a_downlink_capability() {
+        let official_bytes = OfficialWrapper {
+            connect: Some(OfficialConnect {
+                session_id: 42,
+                platform: "android".into(),
+            }),
+            stats: None,
+        }
+        .encode_to_vec();
+        let current = MessageWrapper::decode(official_bytes.as_slice())
+            .unwrap()
+            .connect
+            .unwrap();
+        assert_eq!(current.session_id, 42);
+        assert_eq!(current.platform, "android");
+        assert!(!current.supports_downlink);
+        assert!(!current.supports_playback_routing);
+
+        let duplex_bytes = MessageWrapper {
+            connect: Some(ConnectMessage {
+                session_id: 42,
+                platform: "android".into(),
+                supports_downlink: true,
+                supports_playback_routing: true,
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let official = OfficialWrapper::decode(duplex_bytes.as_slice())
+            .unwrap()
+            .connect
+            .unwrap();
+        assert_eq!(official.session_id, 42);
+        assert_eq!(official.platform, "android");
+    }
+
+    #[test]
+    fn official_stats_uses_field_8_and_is_not_a_downlink_request() {
+        let official_bytes = OfficialWrapper {
+            connect: None,
+            stats: Some(OfficialStats {
+                rtt_ms: 12,
+                jitter_ms: 1.5,
+                packet_loss: 0.25,
+                latency_ms: 40,
+            }),
+        }
+        .encode_to_vec();
+        let current = MessageWrapper::decode(official_bytes.as_slice()).unwrap();
+        let stats = current.stats.unwrap();
+        assert_eq!(stats.rtt_ms, 12);
+        assert_eq!(stats.latency_ms, 40);
+        assert!(current.downlink_request.is_none());
+        assert!(current.downlink_state.is_none());
+        assert!(current.downlink_audio.is_none());
+
+        let request_bytes = fixture("enableRequest");
+        let official = OfficialWrapper::decode(request_bytes.as_slice()).unwrap();
+        assert!(official.stats.is_none());
+        assert!(MessageWrapper::decode(request_bytes.as_slice())
+            .unwrap()
+            .downlink_request
+            .is_some());
     }
 
     #[test]
@@ -171,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_routing_fixtures_roundtrip_and_old_peer_keeps_the_stop_semantics() {
+    fn playback_routing_fixtures_roundtrip() {
         let connect_bytes = fixture("routingConnect");
         let connect = MessageWrapper::decode(connect_bytes.as_slice()).unwrap();
         assert_eq!(
@@ -185,7 +236,7 @@ mod tests {
         );
         assert_eq!(connect.encode_to_vec(), connect_bytes);
         assert_eq!(
-            LegacyWrapper::decode(connect_bytes.as_slice())
+            OfficialWrapper::decode(connect_bytes.as_slice())
                 .unwrap()
                 .connect
                 .unwrap()
@@ -205,14 +256,10 @@ mod tests {
             })
         );
         assert_eq!(request.encode_to_vec(), request_bytes);
-        let old = LegacyWrapper::decode(request_bytes.as_slice())
+        assert!(OfficialWrapper::decode(request_bytes.as_slice())
             .unwrap()
-            .request
-            .unwrap();
-        assert_eq!(
-            (old.session_id, old.request_id, old.enabled),
-            (42, 3, false)
-        );
+            .stats
+            .is_none());
 
         let state_bytes = fixture("routingFailedState");
         let state = MessageWrapper::decode(state_bytes.as_slice()).unwrap();
@@ -234,12 +281,5 @@ mod tests {
             })
         );
         assert_eq!(state.encode_to_vec(), state_bytes);
-        let old = LegacyWrapper::decode(state_bytes.as_slice())
-            .unwrap()
-            .state
-            .unwrap();
-        assert_eq!((old.session_id, old.request_id, old.stream_id), (42, 3, 2));
-        assert!(old.supported && !old.active);
-        assert_eq!(old.error, "playback_failed");
     }
 }

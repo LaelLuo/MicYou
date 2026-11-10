@@ -12,12 +12,17 @@ message MessageWrapper {
     // Cross-device plugin messaging (see docs/plugins/api-reference.md).
     // Unknown to legacy clients: proto3 skips it, so the wire stays compatible.
     PluginMessage pluginMessage = 7;
-    DownlinkRequestMessage downlinkRequest = 8;
-    DownlinkStateMessage downlinkState = 9;
-    DownlinkAudioMessage downlinkAudio = 10;
-    // Remapped from upstream field 8, already used by Duplex DownlinkRequestMessage.
-    // Official clients send StatsMessage at field 8.
-    StatsMessage stats = 11;
+    // Desktop to phone once a second while connected, so the phone can show link quality.
+    // Unknown to legacy clients: proto3 skips it, so the wire stays compatible.
+    StatsMessage stats = 8;
+    // Official field numbers 1-8 match upstream/master. Official may later
+    // append fields in 9-999. Duplex-only fields start at 1000 so those
+    // additions will not collide. This wire is not interoperable with
+    // Duplex 2.1.2, which used fields 8/9/10 for downlink; upgrade the
+    // desktop and phone together.
+    DownlinkRequestMessage downlinkRequest = 1000;
+    DownlinkStateMessage downlinkState = 1001;
+    DownlinkAudioMessage downlinkAudio = 1002;
 }
 
 // Receive-side link statistics measured by the desktop.
@@ -46,11 +51,15 @@ message PluginMessage {
 message ConnectMessage {
     // Zero identifies legacy clients that predate transport session isolation.
     int64 sessionId = 1;
-    bool supportsDownlink = 2;
-    bool supportsPlaybackRouting = 3;
-    // Remapped from upstream field 2, already used by Duplex supportsDownlink.
-    // Official clients send platform at field 2.
-    string platform = 4;
+    // Client platform: "android" or "ios". Empty for clients that predate this field.
+    string platform = 2;
+    // Official field numbers 1-2 match upstream/master. Official may later
+    // append fields in 3-999. Duplex-only fields start at 1000 so those
+    // additions will not collide. This wire is not interoperable with
+    // Duplex 2.1.2, which used fields 2/3 for capability flags; upgrade
+    // the desktop and phone together.
+    bool supportsDownlink = 1000;
+    bool supportsPlaybackRouting = 1001;
 }
 
 message DownlinkRequestMessage {
