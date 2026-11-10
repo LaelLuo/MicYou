@@ -32,12 +32,6 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// Whether this platform has a speaker loopback path for the AEC far-end
-/// reference (macOS does not).
-pub const fn aec_supported() -> bool {
-    !cfg!(target_os = "macos")
-}
-
 /// Names of the output devices cpal can open, sorted and deduplicated.
 pub fn audio_devices() -> Vec<String> {
     let mut names: Vec<String> = match cpal::default_host().output_devices() {
@@ -90,6 +84,7 @@ pub struct StreamingStatus {
     pub is_server_running: bool,
     pub is_connected: bool,
     pub is_muted: bool,
+    pub platform: crate::transport::tcp::ClientPlatform,
 }
 
 /// Handles on the live server state that runtime controls act on.
@@ -207,8 +202,10 @@ impl Controls {
             .dsp_settings
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if settings.aec_enabled && !current.aec_enabled && !aec_supported() {
-            return Err("AEC is not supported on macOS".to_string());
+        if settings.aec_enabled && !current.aec_enabled {
+            if let Some(reason) = micyou_audio::aec_reference_availability().reason {
+                return Err(reason.as_str().to_string());
+            }
         }
         crate::config::save_dsp_settings(&settings)
             .map_err(|e| format!("Failed to persist settings: {e}"))?;
@@ -269,7 +266,12 @@ impl ServerState {
             self.lifecycle.lock().await.phase(),
             crate::server::lifecycle::ServerLifecyclePhase::Running
         );
-        let control_connected = self.active_connection.lock().await.is_some();
+        let control_platform = self
+            .active_connection
+            .lock()
+            .await
+            .as_ref()
+            .map(|connection| connection.platform);
         let audio_active = !matches!(
             *self
                 .active_audio_session
@@ -289,8 +291,9 @@ impl ServerState {
 
         StreamingStatus {
             is_server_running,
-            is_connected: control_connected || audio_active || web_connected,
+            is_connected: control_platform.is_some() || audio_active || web_connected,
             is_muted: self.network_stats.is_muted(),
+            platform: control_platform.unwrap_or_default(),
         }
     }
 }
@@ -378,6 +381,7 @@ mod tests {
             raw_socket: Default::default(),
             connection_id: 1,
             takeover_token: CancellationToken::new(),
+            platform: Default::default(),
         });
 
         let busy = state.active_connection.lock().await;

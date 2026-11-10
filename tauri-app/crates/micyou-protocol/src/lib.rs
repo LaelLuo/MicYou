@@ -180,6 +180,7 @@ mod tests {
                 session_id: 42,
                 supports_downlink: true,
                 supports_playback_routing: true,
+                platform: String::new(),
             })
         );
         assert_eq!(connect.encode_to_vec(), connect_bytes);

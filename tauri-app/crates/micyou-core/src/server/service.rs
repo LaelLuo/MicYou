@@ -122,7 +122,17 @@ impl StartRequest {
 
 /// The interface picked in the GUI, if any. USB mode ignores it like the GUI
 /// does: `adb reverse` delivers connections on loopback, which a server bound
-/// to a LAN address would refuse.
+/// to a LAN address would refuse. See [`listen_address`] for where USB binds.
+/// Where the server listens. USB mode stays on loopback, where both `adb
+/// reverse` and the iOS usbmux bridge arrive, so phones on Wi-Fi cannot
+/// connect to a server the user started for a cable.
+fn listen_address(mode: ConnectionMode, bind_address: Option<String>) -> String {
+    match mode {
+        ConnectionMode::Usb => "127.0.0.1".to_string(),
+        _ => bind_address.unwrap_or_else(|| "0.0.0.0".to_string()),
+    }
+}
+
 fn saved_bind_address(prefs: &crate::config::ServerPrefs, mode: ConnectionMode) -> Option<String> {
     let saved = prefs.bind_address.trim();
     (mode != ConnectionMode::Usb && !prefs.auto_bind && !saved.is_empty() && saved != "0.0.0.0")
@@ -307,7 +317,7 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
     // token only exists between a successful begin_start and the next stop.
     state.lifecycle.lock().await.begin_start().await?;
     state.downlink.recover_route().await;
-    let bind_addr = bind_address.unwrap_or_else(|| "0.0.0.0".to_string());
+    let bind_addr = listen_address(mode, bind_address);
     let cancel_token = CancellationToken::new();
     *state.cancel_token.lock().await = Some(cancel_token.clone());
 
@@ -320,7 +330,8 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
 
     // Web mode advertises its own HTTPS service type; announcing the TCP
     // control service there would point phones at a port that speaks TLS.
-    if mode != ConnectionMode::Web {
+    // USB mode listens on loopback only, so there is nothing to announce.
+    if mode == ConnectionMode::Wifi {
         match crate::discovery::NetworkManager::start_mdns(port, &bind_addr) {
             Ok(manager) => *state.mdns_manager.lock().await = Some(manager),
             Err(e) => {
@@ -418,11 +429,15 @@ pub async fn start_server(state: &ServerState, request: StartRequest) -> Result<
         let error = format!("Failed to start network server: {error}");
         return fail_start(state, &cancel_token, vec![tcp_task, udp_task], error).await;
     }
-    state
-        .background_tasks
-        .lock()
-        .await
-        .extend([tcp_task, udp_task]);
+    let mut tasks = vec![tcp_task, udp_task];
+    // iOS reaches USB mode through usbmuxd instead of adb reverse.
+    if mode == ConnectionMode::Usb {
+        tasks.push(tokio::spawn(crate::platform::usbmux::run_bridge(
+            port,
+            cancel_token.clone(),
+        )));
+    }
+    state.background_tasks.lock().await.extend(tasks);
     state.lifecycle.lock().await.mark_running();
     log::info!("[Server] started on port {port} ({})", mode.as_str());
     Ok(format!("Server started on port {port}"))
@@ -572,8 +587,19 @@ pub async fn stop_server(state: &ServerState) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{saved_bind_address, validate_server_port, ConnectionMode};
+    use super::{listen_address, saved_bind_address, validate_server_port, ConnectionMode};
     use crate::config::ServerPrefs;
+
+    #[test]
+    fn usb_mode_listens_on_loopback_only() {
+        assert_eq!(listen_address(ConnectionMode::Usb, Some("192.168.8.92".into())), "127.0.0.1");
+        assert_eq!(listen_address(ConnectionMode::Usb, None), "127.0.0.1");
+        assert_eq!(listen_address(ConnectionMode::Wifi, None), "0.0.0.0");
+        assert_eq!(
+            listen_address(ConnectionMode::Wifi, Some("192.168.8.92".into())),
+            "192.168.8.92"
+        );
+    }
 
     #[test]
     fn usb_mode_ignores_the_saved_interface() {

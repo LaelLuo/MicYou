@@ -60,6 +60,7 @@ pub struct ActiveConnection {
     pub raw_socket: RawSocketHandle,
     pub connection_id: u64,
     pub takeover_token: CancellationToken,
+    pub platform: ClientPlatform,
 }
 
 pub type SharedActiveConnection = Arc<Mutex<Option<ActiveConnection>>>;
@@ -130,6 +131,37 @@ pub struct DeviceInfo {
     pub name: String,
     pub ip: String,
     pub latency: u32,
+    pub platform: ClientPlatform,
+}
+
+/// Platform the phone reports in its Connect message, normalized at the wire boundary.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientPlatform {
+    Android,
+    Ios,
+    /// Clients that predate the field (every Android release before it) or send an unknown value.
+    #[default]
+    Unknown,
+}
+
+impl ClientPlatform {
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "android" => Self::Android,
+            "ios" => Self::Ios,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Label shown by the CLI and TUI and passed to plugins.
+    pub fn device_label(self) -> &'static str {
+        match self {
+            Self::Android => "MicYou Android",
+            Self::Ios => "MicYou iOS",
+            Self::Unknown => "MicYou Mobile",
+        }
+    }
 }
 
 pub struct TcpServerConfig {
@@ -534,6 +566,12 @@ async fn handle_client(
             supports_downlink: false,
             supports_routing: false,
         });
+    let platform = first_message
+        .connect
+        .as_ref()
+        .map_or(ClientPlatform::Unknown, |connect| {
+            ClientPlatform::from_wire(&connect.platform)
+        });
 
     #[cfg(windows)]
     let raw: RawSocketHandle = std::os::windows::io::AsRawSocket::as_raw_socket(&socket);
@@ -564,6 +602,7 @@ async fn handle_client(
             raw_socket: raw,
             connection_id,
             takeover_token: takeover_token.clone(),
+            platform,
         });
         if let Some(old) = old.as_ref() {
             old.takeover_token.cancel();
@@ -614,11 +653,12 @@ async fn handle_client(
         .await;
     drop(_takeover_guard);
 
-    log::info!("Handshake successful with {}", addr);
+    log::info!("Handshake successful with {} ({:?})", addr, platform);
     let device_info = DeviceInfo {
-        name: "MicYou Mobile".to_string(),
+        name: platform.device_label().to_string(),
         ip: addr.ip().to_string(),
         latency: 12,
+        platform,
     };
     let current_time = crate::stats::unix_millis();
     if is_active(&active_connection, &takeover_token, connection_id).await {
@@ -693,13 +733,17 @@ async fn handle_client(
 
     let stats_emit = stats.clone();
     let events_emit = events.clone();
+    let tx_stats = tx.clone();
     let monitor_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(1000));
         let mut warning_fired = false;
         loop {
             interval.tick().await;
             let buffer_duration = if mode == ConnectionMode::Usb { 5 } else { 30 };
-            events_emit.audio_metrics(stats_emit.to_metrics(buffer_duration));
+            let metrics = stats_emit.to_metrics(buffer_duration);
+            // Best effort: a full control queue only skips this second's report.
+            let _ = tx_stats.try_send(stats_message(&metrics));
+            events_emit.audio_metrics(metrics);
             if cfg!(target_os = "windows")
                 && mode == ConnectionMode::Wifi
                 && !warning_fired
@@ -782,6 +826,20 @@ async fn handle_client(
     reader_result
 }
 
+/// Link statistics for the phone, mirroring what the desktop UI shows.
+fn stats_message(metrics: &crate::stats::AudioMetrics) -> MessageWrapper {
+    let clamp = |value: i64| value.clamp(0, i32::MAX as i64) as i32;
+    MessageWrapper {
+        stats: Some(micyou_protocol::micyou::StatsMessage {
+            rtt_ms: clamp(metrics.network_latency_ms),
+            jitter_ms: metrics.jitter_ms as f32,
+            packet_loss: metrics.packet_loss_rate.clamp(0.0, 1.0) as f32,
+            latency_ms: clamp(metrics.latency_ms),
+        }),
+        ..Default::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_message(
     msg: MessageWrapper,
@@ -833,7 +891,7 @@ async fn handle_message(
                 timestamp: ping.timestamp,
             }),
             plugin_message: None,
-            ..Default::default()
+                ..Default::default()
         };
         let permit = tokio::select! {
             biased;
@@ -969,6 +1027,7 @@ mod tests {
                     session_id: 41,
                     supports_downlink: true,
                     supports_playback_routing: false,
+                    platform: String::new(),
                 }),
                 ..Default::default()
             },
@@ -1158,6 +1217,51 @@ mod tests {
     }
 
     #[test]
+    fn stats_message_clamps_out_of_range_values() {
+        let metrics = crate::stats::AudioMetrics {
+            bitrate: 0,
+            sample_rate: 48_000,
+            latency_ms: i64::MAX,
+            network_latency_ms: -5,
+            packet_loss_rate: 1.5,
+            jitter_ms: 2.5,
+            buffer_duration_ms: 30,
+        };
+        let stats = stats_message(&metrics).stats.unwrap();
+        assert_eq!(stats.rtt_ms, 0);
+        assert_eq!(stats.latency_ms, i32::MAX);
+        assert_eq!(stats.packet_loss, 1.0);
+        assert_eq!(stats.jitter_ms, 2.5);
+    }
+
+    #[test]
+    fn connect_platform_is_normalized() {
+        use micyou_protocol::micyou::ConnectMessage;
+
+        let decode = |connect: ConnectMessage| {
+            let payload = MessageWrapper {
+                connect: Some(connect),
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let wrapper = MessageWrapper::decode(payload.as_slice()).unwrap();
+            ClientPlatform::from_wire(&wrapper.connect.unwrap().platform)
+        };
+        let connect = |platform: &str| ConnectMessage {
+            session_id: 7,
+            supports_downlink: false,
+            supports_playback_routing: false,
+            platform: platform.to_string(),
+        };
+
+        assert_eq!(decode(connect("ios")), ClientPlatform::Ios);
+        assert_eq!(decode(connect("android")), ClientPlatform::Android);
+        // Legacy clients leave the field empty; unexpected values are not trusted.
+        assert_eq!(decode(connect("")), ClientPlatform::Unknown);
+        assert_eq!(decode(connect("iOS ")), ClientPlatform::Unknown);
+    }
+
+    #[test]
     fn frame_header_rejects_negative_payload_length() {
         assert_eq!(
             parse_frame_header(&header(-1)).unwrap_err().kind(),
@@ -1192,6 +1296,7 @@ mod tests {
             raw_socket: 0 as RawSocketHandle,
             connection_id: 1,
             takeover_token: token.clone(),
+            platform: ClientPlatform::Unknown,
         })));
         token.cancel();
         let side_effect_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1216,6 +1321,7 @@ mod tests {
             raw_socket: raw,
             connection_id: 1,
             takeover_token: token.clone(),
+            platform: ClientPlatform::Unknown,
         })));
         let active_audio_session =
             Arc::new(std::sync::RwLock::new(ActiveAudioSession::UnboundLegacy {

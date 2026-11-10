@@ -19,11 +19,13 @@ pub mod dsp;
 pub mod engine;
 pub mod endpoint;
 pub mod loopback;
+#[cfg(target_os = "macos")]
+mod macos_tap;
 pub mod mixer;
 pub mod playback_route;
 pub mod stereo_loopback;
 
-pub use aec::AecFailure;
+pub use aec::{aec_reference_availability, AecAvailability, AecFailure};
 #[cfg(feature = "dsp")]
 pub use dsp::{AudioDspSettings, DspProcessor, EqualizerConfig};
 pub use engine::{device_name, AudioOutputManager, RubatoResampler};

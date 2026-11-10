@@ -9,13 +9,14 @@ import DownlinkCard from '@/features/audio/components/DownlinkCard.vue';
 import { isWindows } from '@/shared/lib/os';
 import { chainStageLabel } from '@/features/audio/chain';
 import { usePlugins } from '@/features/plugins/composables/usePlugins';
-import { isAecSupported, useAudioSettings } from '../../composables/useAudioSettings';
+import { useAudioSettings } from '../../composables/useAudioSettings';
 import { useOutputDevices } from '../../composables/useOutputDevices';
 import DspCard from '../DspCard.vue';
 import { useAudioRouting } from '../../composables/useAudioRouting';
 
 const { t, locale } = useI18n();
-const { settings, aecRuntimeAvailable, loadSettings, syncSettingsToBackend } = useAudioSettings();
+const { settings, isAecSupported, aecRuntimeAvailable, aecReason, loadSettings, syncSettingsToBackend } =
+  useAudioSettings();
 const { fetchDevices } = useOutputDevices();
 const { plugins } = usePlugins();
 const { routingStatus } = useAudioRouting();
@@ -28,7 +29,9 @@ const nsTypes = [
 ];
 
 const displayChain = computed(() =>
-  isAecSupported ? settings.processingChain : settings.processingChain.filter((i) => i !== 'AEC'),
+  isAecSupported.value
+    ? settings.processingChain
+    : settings.processingChain.filter((i) => i !== 'AEC'),
 );
 
 // Plugin:<id> stages show the plugin name rather than a translation key (#347)
@@ -176,7 +179,14 @@ onUnmounted(() => {
       :disabled="!isAecSupported"
     >
       <template #hint>
-        <p v-if="!isAecSupported" class="text-xs text-on-surface-variant mt-1 flex items-center gap-1">
+        <p
+          v-if="aecReason === 'permission_denied'"
+          class="text-xs text-on-surface-variant mt-1 flex items-center gap-1"
+        >
+          <Ban class="w-3 h-3 shrink-0" />
+          {{ $t('settings.audioParams.aecPermissionDenied') }}
+        </p>
+        <p v-else-if="!isAecSupported" class="text-xs text-on-surface-variant mt-1 flex items-center gap-1">
           <Ban class="w-3 h-3 shrink-0" />
           {{ $t('settings.audioParams.aecUnavailable') }}
         </p>

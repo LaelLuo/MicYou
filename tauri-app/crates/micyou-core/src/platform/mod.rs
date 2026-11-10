@@ -24,4 +24,5 @@ pub mod pipewire;
 pub mod resources;
 pub mod playback_route;
 pub mod terminal;
+pub mod usbmux;
 pub mod vbcable;

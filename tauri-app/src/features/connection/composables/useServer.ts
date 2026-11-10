@@ -11,6 +11,7 @@ import {
   notify,
   onEvent,
   type AdbDevice,
+  type ClientPlatform,
   type NetworkInfo,
   type NetworkInterfaceInfo,
 } from '@/platform';
@@ -24,8 +25,10 @@ export type ServerState = 'idle' | 'starting' | 'connecting' | 'streaming';
 const aecFailureNotificationKeys: Record<string, string> = {
   inference_failed: 'app.notify.aecDisabledInferenceFailed',
   model_load_failed: 'app.notify.aecDisabledModelLoadFailed',
+  permission_denied: 'app.notify.aecDisabledPermissionDenied',
   pipewire_unavailable: 'app.notify.aecDisabledPipeWireUnavailable',
   reference_lost: 'app.notify.aecDisabledReferenceLost',
+  unsupported_os: 'app.notify.aecDisabledUnsupportedOs',
   virtual_source_missing: 'app.notify.aecDisabledVirtualSourceMissing',
   monitor_conflict: 'routing.aec.monitor_conflict',
   identity_unavailable: 'routing.aec.identity_unavailable',
@@ -101,6 +104,9 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
   const activeConnectionMode = ref<ConnectionMode | null>(null);
   const activePort = ref<number | null>(null);
 
+  // Platform of the connected phone, reported in its Connect message
+  const clientPlatform = ref<ClientPlatform>('unknown');
+
   // Computes the display representation of the active bind IP address
   const displayIp = computed(() => {
     if (isAutoBind.value) {
@@ -118,6 +124,8 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
       if (mode === 'web') {
         return t('app.web.clientsConnected', { count: webClientCount.value });
       }
+      if (clientPlatform.value === 'ios') return t('app.status.streamingDescIos');
+      if (clientPlatform.value === 'android') return t('app.status.streamingDescAndroid');
       return t('app.status.streamingDesc');
     }
     if (serverState.value === 'connecting') {
@@ -231,7 +239,7 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
           return;
         }
         if (result.type === 'NoDevices') {
-          throw new Error('No USB devices found. Please connect a device and enable USB debugging.');
+          throw new Error('No USB devices found. Connect an Android device with USB debugging enabled, or an iPhone or iPad.');
         }
       }
       if (mode === 'web') {
@@ -241,6 +249,7 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
       }
       const status = await command('get_streaming_status').catch(() => null);
       if (status?.isConnected) {
+        clientPlatform.value = status.platform;
         ensureStreamingState();
       } else if (serverState.value === 'starting') {
         serverState.value = 'connecting';
@@ -410,7 +419,10 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
   // happens while the window loads is missed.
   function listenToServer() {
     return Promise.all([
-      track(onEvent('device-connected', ensureStreamingState)),
+      track(onEvent('device-connected', (info) => {
+        clientPlatform.value = info.platform;
+        ensureStreamingState();
+      })),
       track(onEvent('device-disconnected', onDeviceDisconnected)),
       // Stops triggered elsewhere (tray, plugins, another window)
       track(onEvent('server-stopped', () => {
@@ -473,6 +485,7 @@ export function useServer(options?: { audioLevel?: Ref<number>; isMuted?: Ref<bo
       const status = await command('get_streaming_status');
       if (status.isServerRunning) {
         serverState.value = status.isConnected ? 'streaming' : 'connecting';
+        clientPlatform.value = status.platform;
         activeConnectionMode.value = connectionMode.value;
         activePort.value = portFor(connectionMode.value);
         if (options?.isMuted) {

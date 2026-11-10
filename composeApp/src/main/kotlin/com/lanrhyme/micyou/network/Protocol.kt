@@ -104,7 +104,11 @@ data class ConnectMessage(
     val sessionId: Long = 0,
     @ProtoNumber(2)
     val supportsDownlink: Boolean = false,
-    @ProtoNumber(3) val supportsPlaybackRouting: Boolean = false
+    @ProtoNumber(3) val supportsPlaybackRouting: Boolean = false,
+    // Remapped from upstream field 2 so existing Duplex 2.1.2 phones keep
+    // supportsDownlink on field 2. Official clients send platform at field 2.
+    @ProtoNumber(4)
+    val platform: String = ""
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -156,11 +160,85 @@ data class PongMessage(
     val timestamp: Long
 )
 
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class StatsMessage(
+    @ProtoNumber(1) val rttMs: Int = 0,
+    @ProtoNumber(2) val jitterMs: Float = 0f,
+    @ProtoNumber(3) val packetLoss: Float = 0f,
+    @ProtoNumber(4) val latencyMs: Int = 0
+)
+
+/**
+ * Cross-device plugin message, mirroring `micyou.PluginMessage` in
+ * micyou-protocol/proto/network.proto (MessageWrapper field 7).
+ *
+ * Carries plugin-bus traffic between the phone and desktop plugins (e.g. the
+ * Soundpad remote control). `correlationId` pairs requests with responses on
+ * the host bus (0 = one-way); `target` empty = broadcast; `errorCode` mirrors
+ * the plugin error codes (0 = ok). Payload semantics are defined by the
+ * plugins themselves — the app routes on `source`/`target` only.
+ */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class PluginMessage(
+    @ProtoNumber(1)
+    val source: String = "",
+    @ProtoNumber(2)
+    val target: String = "",
+    @ProtoNumber(3)
+    val topic: String = "",
+    @ProtoNumber(4)
+    val payload: ByteArray = ByteArray(0),
+    // uint64 on the wire; correlation ids stay well below Long.MAX in practice.
+    @ProtoNumber(5)
+    val correlationId: Long = 0,
+    @ProtoNumber(6)
+    val isResponse: Boolean = false,
+    @ProtoNumber(7)
+    val errorCode: Int = 0,
+    @ProtoNumber(8)
+    val errorMessage: String = ""
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other == null || this::class != other::class) return false
+
+        other as PluginMessage
+
+        if (source != other.source) return false
+        if (target != other.target) return false
+        if (topic != other.topic) return false
+        if (!payload.contentEquals(other.payload)) return false
+        if (correlationId != other.correlationId) return false
+        if (isResponse != other.isResponse) return false
+        if (errorCode != other.errorCode) return false
+        if (errorMessage != other.errorMessage) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = source.hashCode()
+        result = 31 * result + target.hashCode()
+        result = 31 * result + topic.hashCode()
+        result = 31 * result + payload.contentHashCode()
+        result = 31 * result + correlationId.hashCode()
+        result = 31 * result + isResponse.hashCode()
+        result = 31 * result + errorCode
+        result = 31 * result + errorMessage.hashCode()
+        return result
+    }
+}
+
 // TCP handshake strings, matching HANDSHAKE_CLIENT_STR / HANDSHAKE_SERVER_STR in micyou-protocol
 const val HANDSHAKE_CLIENT = "MicYouCheck1"
 const val HANDSHAKE_SERVER = "MicYouCheck2"
 const val PACKET_MAGIC = 0x4D696359 // "MicY" in ASCII
 const val UDP_PACKET_MAGIC = 0x4D696355 // "MicU" in ASCII
+/** ConnectMessage.platform 取值，与 micyou-core 的 ClientPlatform 对应 */
+const val CLIENT_PLATFORM = "android"
 /** TCP 控制帧负载上限，与 micyou-core 的 MAX_CONTROL_PAYLOAD_LEN 一致 */
 const val MAX_CONTROL_PAYLOAD_SIZE = 1024 * 1024
 const val UDP_CUSTOM_HEADER_SIZE = 8
@@ -191,7 +269,7 @@ fun calculateUdpPort(tcpPort: Int): Int {
 
 /** 判断 MessageWrapper 是否包含控制消息（应通过 TCP 发送） */
 fun MessageWrapper.hasControlMessage(): Boolean {
-    return connect != null || mute != null || ping != null || pong != null || downlinkRequest != null
+    return connect != null || mute != null || ping != null || pong != null || pluginMessage != null || downlinkRequest != null
 }
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -207,10 +285,17 @@ data class MessageWrapper(
     val ping: PingMessage? = null,
     @ProtoNumber(6)
     val pong: PongMessage? = null,
+    // Cross-device plugin messaging (micyou-protocol network.proto field 7).
+    // proto3 skips unknown fields, so legacy desktops simply ignore it.
+    @ProtoNumber(7)
+    val pluginMessage: PluginMessage? = null,
     @ProtoNumber(8)
     val downlinkRequest: DownlinkRequestMessage? = null,
     @ProtoNumber(9)
     val downlinkState: DownlinkStateMessage? = null,
     @ProtoNumber(10)
-    val downlinkAudio: DownlinkAudioMessage? = null
+    val downlinkAudio: DownlinkAudioMessage? = null,
+    // Remapped from upstream field 8; official clients send stats at field 8.
+    @ProtoNumber(11)
+    val stats: StatsMessage? = null
 )

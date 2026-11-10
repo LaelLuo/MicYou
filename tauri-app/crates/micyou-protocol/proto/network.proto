@@ -15,6 +15,17 @@ message MessageWrapper {
     DownlinkRequestMessage downlinkRequest = 8;
     DownlinkStateMessage downlinkState = 9;
     DownlinkAudioMessage downlinkAudio = 10;
+    // Remapped from upstream field 8, already used by Duplex DownlinkRequestMessage.
+    // Official clients send StatsMessage at field 8.
+    StatsMessage stats = 11;
+}
+
+// Receive-side link statistics measured by the desktop.
+message StatsMessage {
+    int32 rttMs = 1;        // smoothed ping/pong round trip, 0 until the first pong
+    float jitterMs = 2;     // audio packet arrival jitter
+    float packetLoss = 3;   // fraction of audio packets lost, 0.0 to 1.0
+    int32 latencyMs = 4;    // estimated end-to-end latency: receive buffer plus round trip
 }
 
 // Cross-device plugin message: request/response and one-way events between
@@ -37,6 +48,9 @@ message ConnectMessage {
     int64 sessionId = 1;
     bool supportsDownlink = 2;
     bool supportsPlaybackRouting = 3;
+    // Remapped from upstream field 2, already used by Duplex supportsDownlink.
+    // Official clients send platform at field 2.
+    string platform = 4;
 }
 
 message DownlinkRequestMessage {

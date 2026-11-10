@@ -26,6 +26,7 @@ log.workspace = true
 md-5 = "0.10.6"
 mdns-sd = "0.21"
 opus-decoder = "0.1.1"
+plist = "1.10.1"
 prost.workspace = true
 reqwest.workspace = true
 semver.workspace = true
@@ -47,6 +48,10 @@ open = { version = "5.3.5", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# AppKit's resolved accent colour (`NSColor.controlAccentColor`).
+objc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["handleapi", "processthreadsapi", "winnt", "winsock2"] }

@@ -423,6 +423,7 @@ async fn handle_ws_socket(
                 name: "Web Browser".to_string(),
                 ip: "browser".to_string(),
                 latency: 0,
+                platform: crate::transport::tcp::ClientPlatform::Unknown,
             });
     }
 

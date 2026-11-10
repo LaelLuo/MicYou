@@ -49,7 +49,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -73,6 +76,7 @@ import com.lanrhyme.micyou.audio.AndroidAudioSource
 import com.lanrhyme.micyou.audio.AudioLevelData
 import com.lanrhyme.micyou.network.AudioPacketMessage
 import com.lanrhyme.micyou.network.AudioPacketMessageOrdered
+import com.lanrhyme.micyou.network.CLIENT_PLATFORM
 import com.lanrhyme.micyou.network.CODEC_OPUS
 import com.lanrhyme.micyou.network.ConnectMessage
 import com.lanrhyme.micyou.network.HANDSHAKE_CLIENT
@@ -94,6 +98,7 @@ import com.lanrhyme.micyou.viewmodel.StreamState
 import com.lanrhyme.micyou.viewmodel.TransportProtocol
 import com.lanrhyme.micyou.network.hasControlMessage
 import com.lanrhyme.micyou.network.MuteMessage
+import com.lanrhyme.micyou.network.PluginMessage
 import com.lanrhyme.micyou.network.PongMessage
 internal suspend fun awaitJobWithin(job: Job, timeoutMs: Long): Boolean =
     withTimeoutOrNull(timeoutMs) {
@@ -356,6 +361,14 @@ class AudioEngine constructor() {
     @Volatile private var downlinkSession: DownlinkSession? = null
 
     fun setDesktopAudioEnabled(enabled: Boolean) { downlinkSession?.setEnabled(enabled) }
+    // 跨设备插件消息（MessageWrapper 字段 7）：reader 循环收到的桌面端插件
+    // 消息在此广播；SoundPad 等控制器自行按 source 过滤。DROP_OLDEST 保证
+    // reader 循环永不因消费者慢而阻塞。
+    private val _pluginMessages = MutableSharedFlow<PluginMessage>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val pluginMessages: SharedFlow<PluginMessage> = _pluginMessages.asSharedFlow()
 
     private data class StopResources(
         val sessionJob: Job?,
@@ -690,7 +703,12 @@ class AudioEngine constructor() {
                             Logger.i("AudioEngine", "Handshake successful")
                             val connectBytes = proto.encodeToByteArray(
                                 MessageWrapper.serializer(),
-                                MessageWrapper(connect = ConnectMessage(sessionId, supportsDownlink = true, supportsPlaybackRouting = true))
+                                MessageWrapper(connect = ConnectMessage(
+                                    sessionId,
+                                    supportsDownlink = true,
+                                    supportsPlaybackRouting = true,
+                                    platform = CLIENT_PLATFORM,
+                                ))
                             )
                             out.writeInt(PACKET_MAGIC)
                             out.writeInt(connectBytes.size)
@@ -823,6 +841,10 @@ class AudioEngine constructor() {
                                                 if (wrapper.ping != null) {
                                                     sessionLastPingReceivedTime.set(SystemClock.elapsedRealtime())
                                                     channel.send(MessageWrapper(pong = PongMessage(wrapper.ping.timestamp)))
+                                                }
+
+                                                wrapper.pluginMessage?.let { pm ->
+                                                    _pluginMessages.tryEmit(pm)
                                                 }
                                             } catch (e: Exception) {
                                                 Logger.e("AudioEngine", "Error decoding incoming message", e)
@@ -1507,6 +1529,24 @@ class AudioEngine constructor() {
             context.startService(intent)
         } catch (e: Exception) {
             Logger.w("AudioEngine", "Failed to stop streaming notification: ${e.message}")
+        }
+    }
+
+    /**
+     * Send a cross-device plugin message over the TCP control channel
+     * (MessageWrapper field 7). Non-blocking; returns false when no session
+     * is active or the send buffer is full.
+     */
+    fun sendPluginMessage(message: PluginMessage): Boolean {
+        if (_state.value != StreamState.Streaming && _state.value != StreamState.Connecting) {
+            return false
+        }
+        val ch = sendChannel ?: return false
+        return try {
+            ch.trySend(MessageWrapper(pluginMessage = message)).isSuccess
+        } catch (e: Exception) {
+            Logger.w("AudioEngine", "Failed to enqueue plugin message: ${e.message}")
+            false
         }
     }
 
